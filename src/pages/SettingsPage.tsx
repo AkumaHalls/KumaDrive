@@ -1,4 +1,4 @@
-﻿﻿import { useState } from "react";
+﻿import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Smartphone, Eye, HardDrive, Info, Shield } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -69,7 +69,7 @@ export default function SettingsPage() {
     setIsLoggingOut(true);
     try {
       // Step 1: Disconnect and destroy the GramJS client singleton first.
-      // Without this, initClient() reuses the stale session â†’ AUTH_RESTART.
+      // Without this, initClient() reuses the stale session → AUTH_RESTART.
       const { disconnectClient } = await import("@/lib/telegram/client");
       await disconnectClient();
 
@@ -89,7 +89,7 @@ export default function SettingsPage() {
       // Why NOT delete channel IDs?
       //   They are NOT credentials. Deleting them forces a dialog search on
       //   next login where GramJS returns BigInt IDs in a different format,
-      //   causing metadataStore to fail to resolve the channel â†’ empty drive.
+      //   causing metadataStore to fail to resolve the channel → empty drive.
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("clear_session_only").catch((e: any) =>
         console.warn("clear_session_only failed (non-fatal):", e)
@@ -107,12 +107,19 @@ export default function SettingsPage() {
       // Reset bootstrapComplete too — see TelegramAccountSection.handleDisconnect
       // for the same fix; without it, the next login's bootstrap gate is
       // already true and uploads could race the orphan scan.
+      //
+      // `bootstrapComplete` PRECISA ser zerado pela action, não por
+      // `setState`: só a action remove o flag `kumadrive_bootstrap_done`
+      // do sessionStorage. Com `setState` o flag sobrevivia ao logout e,
+      // como `logout()` apaga o cache de arquivos, o reload seguinte
+      // abria com o gate liberado e `files` vazio — estado que autoriza o
+      // uploadManager a sobrescrever o índice do canal com nada.
+      useFileStore.getState().setBootstrapComplete(false);
       useFileStore.setState({
         files: [],
         selectedIds: [],
         selectedIdsSet: new Set(),
         currentFolder: "/",
-        bootstrapComplete: false,
       });
 
       // (Backend license session removed — nothing to wipe)

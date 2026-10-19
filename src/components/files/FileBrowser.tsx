@@ -1,4 +1,4 @@
-﻿﻿﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -261,7 +261,7 @@ export function FileBrowser({ folderPath = "/", mode = "drive", searchQuery = ""
     }
   }, [folderPath, mode, setFolder]);
 
-  // â”€â”€ Memoized derived data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Memoized derived data ———————————————————————————————————————————————
 
   const sortLabel = useMemo(() => {
     switch (sortBy) {
@@ -304,13 +304,15 @@ export function FileBrowser({ folderPath = "/", mode = "drive", searchQuery = ""
    * folder duplicates between cold starts because:
    *   - `setRemoteDelta` only calls `dedupeByMessageId` (skips folders).
    *   - `loadIndexIncremental` doesn't call any folder-collapse helper.
-   *   - The user-visible `createFolder` path uses random ids, not the
-   *     canonical `folderIdForPath`, so a folder can exist under both ids.
+   *   - Entradas antigas criadas antes da adoção de `folderIdForPath` ainda
+   *     carregam ids aleatórios/truncados no índice persistido; o
+   *     `createFolder` atual já usa `folderIdForPath`, mas o índice antigo
+   *     não se reescreve sozinho.
    *
    * Without this pass, two folder entries with the same full path but
    * different ids render as two separate cards (each keyed by `folder.id`).
-   * The fix mirrors `healAndSave`: dedupeByMessageId â†’ dedupeByContentKey
-   * â†’ collapseDuplicateFolders. The output `useMemo`s downstream stay
+   * The fix mirrors `healAndSave`: dedupeByMessageId → dedupeByContentKey
+   * → collapseDuplicateFolders. The output `useMemo`s downstream stay
    * structurally the same; only the input is cleaner.
    */
   const dedupedActiveFiles = useMemo(
@@ -557,7 +559,7 @@ export function FileBrowser({ folderPath = "/", mode = "drive", searchQuery = ""
     }
   }, [mode, folderPath, searchQuery]);
 
-  // â”€â”€ Memoized callbacks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Memoized callbacks ——————————————————————————————————————————————————
 
   const toastPreview = useCallback((file: TeleFile) => {
     window.dispatchEvent(new CustomEvent("kumadrive-preview-file", { detail: file }));

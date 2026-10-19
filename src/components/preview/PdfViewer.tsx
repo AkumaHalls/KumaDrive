@@ -1,4 +1,4 @@
-﻿﻿﻿/**
+﻿﻿/**
  * PdfViewer.tsx
  * Production-quality, crash-safe PDF viewer for KumaDrive (Tauri).
  *
@@ -38,7 +38,7 @@ import {
   Plus,
 } from "lucide-react";
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Types ————————————————————————————————————————————————————————————————————
 
 interface Props {
   data: Uint8Array | null;
@@ -52,13 +52,13 @@ interface PageEntry {
   height: number;  // CSS pixels at scale=1, rotation=0
 }
 
-// â”€â”€â”€ Utility: clamp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Utility: clamp ———————————————————————————————————————————————————————————
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
-// â”€â”€â”€ SinglePageCanvas — renders one PDF page in an IntersectionObserver â”€â”€â”€â”€â”€â”€
+// ——— SinglePageCanvas — renders one PDF page in an IntersectionObserver ——————
 
 interface PageCanvasProps {
   pdfDoc: any;
@@ -176,13 +176,13 @@ const PageCanvas = memo(function PageCanvas({
   );
 });
 
-// â”€â”€â”€ Main PdfViewer Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Main PdfViewer Component —————————————————————————————————————————————————
 
 export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
 
-  // â”€â”€ PDF state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— PDF state ————————————————————————————————————————————————————————————
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [totalPages, setTotalPages] = useState(0);
   const [pages, setPages] = useState<PageEntry[]>([]);
@@ -190,7 +190,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
   const [error, setError] = useState<string | null>(null);
   const pdfDocRef = useRef<any>(null); // for cleanup
 
-  // â”€â”€ View state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— View state ————————————————————————————————————————————————————————————
   const [scale, setScale] = useState(1.25);
   const [rotation, setRotation] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
@@ -200,7 +200,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
   // Track visible page via scroll
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  // â”€â”€ Load PDF â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Load PDF —————————————————————————————————————————————————————————————
   useEffect(() => {
     let cancelled = false;
 
@@ -324,7 +324,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
   }, []);
 
 
-  // â”€â”€ Scroll-based current page tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Scroll-based current page tracking ———————————————————————————————————
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container || pages.length === 0) return;
@@ -359,7 +359,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     return () => container.removeEventListener("scroll", onScroll);
   }, [pages]);
 
-  // â”€â”€ Zoom â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Zoom —————————————————————————————————————————————————————————————————
   const MIN_SCALE = 0.25;
   const MAX_SCALE = 5.0;
   const ZOOM_STEP = 0.25;
@@ -422,7 +422,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     return () => container.removeEventListener("wheel", onWheel);
   }, []);
 
-  // â”€â”€ Keyboard navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Keyboard navigation ———————————————————————————————————————————————————
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Don't hijack if user is typing in an input
@@ -463,7 +463,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [isEditingPage, zoomIn, zoomOut]);
 
-  // â”€â”€ Page navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Page navigation ———————————————————————————————————————————————————————
   const scrollToPage = useCallback((pageNum: number) => {
     const el = pageRefs.current[pageNum - 1];
     if (el) {
@@ -491,7 +491,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     setIsEditingPage(false);
   }, [pageInputValue, totalPages, currentPage, scrollToPage]);
 
-  // â”€â”€ Print â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Print —————————————————————————————————————————————————————————————————
   const handlePrint = useCallback(() => {
     if (!data) return;
     try {
@@ -518,7 +518,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     }
   }, [data]);
 
-  // â”€â”€ Computed page dimensions at current scale â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Computed page dimensions at current scale —————————————————————————————
   const pageRects = useMemo(() => {
     return pages.map((p) => {
       const isRotated = rotation % 180 !== 0;
@@ -528,7 +528,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     });
   }, [pages, scale, rotation]);
 
-  // â”€â”€ Loading state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Loading state —————————————————————————————————————————————————————————
   if (loading) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center bg-[#1a1b1e] text-slate-300 gap-4 select-none">
@@ -550,7 +550,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     );
   }
 
-  // â”€â”€ Error state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Error state ————————————————————————————————————————————————————————————
   if (error) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center bg-[#1a1b1e] text-white p-6 text-center select-none">
@@ -574,10 +574,10 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
     );
   }
 
-  // â”€â”€ Main render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Main render ————————————————————————————————————————————————————————————
   return (
     <div className="relative w-full h-full flex flex-col bg-[#1a1b1e] select-none overflow-hidden">
-      {/* â”€â”€ Toolbar â”€â”€ */}
+      {/* —— Toolbar —— */}
       <div
         ref={toolbarRef}
         className="flex-none h-11 px-3 bg-[#25272b]/98 backdrop-blur border-b border-white/[0.06] flex items-center justify-between z-20 text-slate-200 text-xs gap-2"
@@ -728,7 +728,7 @@ export function PdfViewer({ data, fileName, onOpenSystemApp }: Props) {
         </div>
       </div>
 
-      {/* â”€â”€ Scroll Canvas Area â”€â”€ */}
+      {/* —— Scroll Canvas Area —— */}
       <div
         ref={scrollContainerRef}
         className="flex-1 overflow-auto bg-[#141517]"

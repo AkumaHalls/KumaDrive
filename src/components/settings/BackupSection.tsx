@@ -1,7 +1,7 @@
 /**
  * BackupSection — settings panel for the device-backup Pro feature.
  *
- * Renders inside PlanSection (Settings â†’ Plan & Devices). For FREE users
+ * Renders inside PlanSection (Settings → Plan & Devices). For FREE users
  * the section is visible but disabled with an "Upgrade to enable" CTA.
  * For PRO users it shows:
  *   - Source folders (auto-saved on pick)
@@ -105,7 +105,18 @@ export default function BackupSection() {
     try {
       await setIntervalMinutes(preset.minutes);
     } catch (err) {
+      // O badge "Ativo" vem do localStorage, que `setProSchedule` grava
+      // ANTES de chamar o comando Rust. Se o `invoke` falhar, o badge
+      // ficaria "Ativo" com o timer nunca criado — o usuário acreditaria
+      // que o backup está agendado e ele nunca rodaria.
       console.warn("[BackupSection] setIntervalMinutes failed:", err);
+      toast.error("Não foi possível ativar o backup agendado", {
+        description:
+          err instanceof Error
+            ? err.message
+            : "O agendamento interno não respondeu. Reinicie o KumaDrive e tente de novo.",
+      });
+      return;
     } finally {
       setPendingInterval(null);
     }
@@ -143,14 +154,26 @@ export default function BackupSection() {
   }
 
   async function handleRunNow() {
+    // O botão NÃO fica desabilitado quando não há pastas: um botão cinza
+    // e mudo não explica o motivo. Clicar aqui mostra o aviso com a
+    // orientação do que fazer.
     if (paths.length === 0) {
-      toast.warning("Escolha pelo menos uma pasta de origem primeiro");
+      toast.warning("Selecione pelo menos uma pasta de origem", {
+        description:
+          "Use o botão “Adicionar pasta” acima para escolher a pasta que será espelhada no canal do Telegram.",
+      });
       return;
     }
     try {
       await runRunnerNow();
     } catch (err) {
+      // `runNow` não deveria lançar — o runner reporta falha via status.
+      // Se chegar aqui é um erro inesperado; silenciar no console deixaria
+      // o usuário sem nenhuma pista do que aconteceu.
       console.warn("[BackupSection] runNow failed:", err);
+      toast.error("O backup não pôde ser iniciado", {
+        description: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -412,7 +435,16 @@ export default function BackupSection() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {isRunning && (
+            {/* Só quando o run foi iniciado por ESTE hook. O
+                cancelamento para o caminho AGENDADO é o botão do
+                `BackupProgressOverlay` (ele registra o AbortController
+                do tick via `setCancelHandler`); mostrar "Cancelar"
+                AQUI num run agendado prometia um cancelamento que este
+                hook não tem: o `controllerRef.current` é `null`, o
+                `.abort()` era no-op, o botão sumia e o overlay dizia
+                "Backup cancelado" enquanto o runner continuava
+                espelhando o disco inteiro. */}
+            {runnerIsRunning && (
               <Button
                 size="sm"
                 variant="ghost"
@@ -427,7 +459,7 @@ export default function BackupSection() {
               variant="outline"
               className="rounded-full text-xs font-medium border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 h-9 px-4 disabled:opacity-50"
               onClick={handleRunNow}
-              disabled={isRunning || paths.length === 0}
+              disabled={isRunning}
             >
               {isRunning ? (
                 <>

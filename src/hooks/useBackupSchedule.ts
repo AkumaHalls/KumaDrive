@@ -7,7 +7,8 @@
 import { useCallback, useMemo } from "react";
 import { useLicenseStore } from "@/stores/licenseStore";
 import { useFileStore } from "@/stores/fileStore";
-import { applyIntervalChange, runBackupNow } from "@/lib/backup/scheduler";
+import { useBackupProgressStore } from "@/stores/backupProgressStore";
+import { applyIntervalChange } from "@/lib/backup/scheduler";
 
 export type BackupIntervalMinutes = number | null;
 
@@ -22,15 +23,23 @@ export interface UseBackupSchedule {
   isRunning: boolean;
   /** Update the schedule interval and restart the Rust timer accordingly. */
   setIntervalMinutes: (minutes: BackupIntervalMinutes) => Promise<void>;
-  /** Trigger a manual snapshot right now. Resolves when done. */
-  runNow: () => Promise<void>;
 }
 
 export function useBackupSchedule(): UseBackupSchedule {
   const license = useLicenseStore((s) => s.license);
   const lastBackupAt = useFileStore((s) => s.lastBackupAt);
-  const indexQueueState = useFileStore((s) => s.indexQueueState);
   const setProSchedule = useLicenseStore((s) => s.setProSchedule);
+  // A fonte da verdade para "um backup está em voo" é `active` da store de
+  // progresso — setado por `start()` e limpo só por `finish`/`fail`/
+  // `cancel`, independentemente de quem iniciou o run.
+  //
+  // O campo antigo era `indexQueueState === "backup-running"`, escrito pelo
+  // scheduler no início do tick. Mas o IndexQueue é o DONO daquele campo e
+  // o sobrescreve para "saving"/"idle" já no primeiro `enqueueSave` do
+  // próprio backup — então, durante quase todo um backup AGENDADO, o botão
+  // "Fazer backup agora" ficava liberado e um clique partia um run manual
+  // por cima (resetando o overlay e sequestrando o botão Cancelar).
+  const backupActive = useBackupProgressStore((s) => s.active);
 
   const intervalMinutes = useMemo<BackupIntervalMinutes>(() => {
     const v = license?.scheduledBackupIntervalMinutes;
@@ -46,16 +55,11 @@ export function useBackupSchedule(): UseBackupSchedule {
     [setProSchedule],
   );
 
-  const runNow = useCallback(async () => {
-    await runBackupNow();
-  }, []);
-
   return {
     intervalMinutes,
     isPro: true, // All users have full backup access
     lastBackupAt,
-    isRunning: indexQueueState === "backup-running",
+    isRunning: backupActive,
     setIntervalMinutes,
-    runNow,
   };
 }

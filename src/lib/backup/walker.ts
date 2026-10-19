@@ -1,4 +1,4 @@
-﻿﻿/**
+/**
  * Device backup — source-folder walker.
  *
  * Walks one or more local source folders recursively and returns a flat
@@ -52,7 +52,7 @@ export interface WalkedFile {
 }
 
 /** Raw result returned by the Rust command. Field names match Rust exactly
- *  (Tauri does NOT convert snake_case â†” camelCase on the wire). Used only
+ *  (Tauri does NOT convert snake_case → camelCase on the wire). Used only
  *  at the IPC boundary — convert to `WalkedFile` (camelCase) before
  *  handing off to the rest of the pipeline. */
 interface RustDirEntry {
@@ -78,28 +78,63 @@ function yieldToUi(): Promise<void> {
  *                         to compute the channel-side folderPath.
  *
  * NOTE on the Rust command: the Rust side does NOT do exclude matching
- * (we want to keep the Rust binary small). Instead, the TS layer prunes
- * the recursion by passing it ONLY the directories that survived the
- * exclude filter. The Rust command accepts an array of root paths and
- * returns EVERY file under them — we filter by absPath prefix in the
- * exclude check below.
+ * (we want to keep the Rust binary small). `read_dir_recursive` aceita UM
+ * root e devolve uma lista PLANA (dirs + filhos, pai antes dos filhos).
+ * O filtro de exclude roda inteiro no TS, dentro de `walkOneFolder`:
+ * match exato do padrão para arquivos, e para dirs excluídos registra-se
+ * o `relPath + "/"` como prefixo de subtree e derruba qualquer entrada
+ * seguinte que comece com ele. (Antes este comentário prometia um filtro
+ * por prefixo que NÃO existia — excluir uma pasta do usuário não
+ * excluía o conteúdo e os arquivos dentro dela subiam ao Telegram.)
  */
+/**
+ * Resultado de uma varredura das pastas de origem.
+ *
+ * `unreadableRoots` existia como conceito mas não tinha canal de
+ * retorno: `walkOneFolder` engolia a falha no `catch` e devolvia `void`.
+ * Com isso o runner recebia `files: []` sem forma de distinguir "a pasta
+ * está vazia" de "a pasta não pôde ser lida" — e reportava **sucesso
+ * sem ter lido nada**. Agora a falha sobe.
+ */
+export interface WalkResult {
+  files: WalkedFile[];
+  /** Raízes configuradas que falharam ao ser lidas (inexistente, sem permissão, etc.). */
+  unreadableRoots: string[];
+  /**
+   * True quando o `signal` interrompeu a varredura no meio.
+   *
+   * Sem este campo, `files.length` era o ÚNICO total que o runner tinha —
+   * e um cancel durante a caminhada produzia `files` truncado. Os wrappers
+   * (useBackupRunner / scheduler) calculam "o run terminou 100%?" como
+   * `uploaded + skipped === totalFound`, e com o total truncado essa
+   * comparação era VERDADEIRA TRIVIALMENTE: um backup cancelado durante a
+   * caminhada terminava como `status: "success"`, o overlay mostrava
+   * "cancelado" por um instante e depois "Backup concluído" com toast de
+   * sucesso — contradizendo a ação do usuário.
+   */
+  truncatedByAbort: boolean;
+}
+
 export async function walkSourceFolders(
   folders: BackupSourceFolders,
   opts: { signal?: AbortSignal } = {},
-): Promise<WalkedFile[]> {
-  if (!folders.paths || folders.paths.length === 0) return [];
+): Promise<WalkResult> {
+  if (!folders.paths || folders.paths.length === 0) {
+    return { files: [], unreadableRoots: [], truncatedByAbort: false };
+  }
   const out: WalkedFile[] = [];
+  const unreadableRoots: string[] = [];
 
   for (const root of folders.paths) {
-    if (opts.signal?.aborted) return out;
-    await walkOneFolder(root, folders.excludes ?? [], out, opts.signal);
+    if (opts.signal?.aborted) break;
+    const ok = await walkOneFolder(root, folders.excludes ?? [], out, opts.signal);
+    if (!ok) unreadableRoots.push(root);
     // Yield between source folders so a 5-folder config still keeps the
     // UI thread breathing.
     await yieldToUi();
   }
 
-  return out;
+  return { files: out, unreadableRoots, truncatedByAbort: !!opts.signal?.aborted };
 }
 
 async function walkOneFolder(
@@ -107,20 +142,38 @@ async function walkOneFolder(
   excludes: string[],
   out: WalkedFile[],
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   let entries: RustDirEntry[];
   try {
     entries = await invoke<RustDirEntry[]>("read_dir_recursive", { path: absRoot });
   } catch (err) {
-    // Source folder missing / unreadable / not a directory. Surface a
-    // warning and skip — don't fail the whole backup because one path
-    // is gone (the user may have removed an external drive mid-day).
+    // Source folder missing / unreadable / not a directory. We record the
+    // failure and let the caller decide — before this returned `void`, so
+    // the runner could not tell an unreadable folder from an empty one.
     console.warn(`[backup.walker] failed to read ${absRoot}:`, err);
-    return;
+    return false;
   }
 
+  // Slice start for this root's dedupe pass (see the note at the bottom).
+  const startIdx = out.length;
+
+  // Excludes de diretório já decididos, guardados como PREFIXOS de
+  // subtree — este é o MAJOR da auditoria round 4. O comentário antigo
+  // prometia "we filter them below by abs_path prefix", mas esse filtro
+  // NÃO existia: `globToRegex` gera regex ancorada `^...$`, sem noção de
+  // subtree, e o loop só checava o match EXATO da entrada. Então excluir
+  // `privado` derrubava a entrada de diretório (que nunca seria enviada
+  // de qualquer forma) e TODO filho — `privado/relatorio-financeiro.pdf`
+  // — passava reto e subia ao Telegram. Os `DEFAULT_EXCLUDES` escapavam
+  // do bug porque vêm em pares `X` + `X/**`; padrão de USUÁRIO não.
+  //
+  // O `read_dir_recursive` do Rust devolve lista PLANA em ordem de
+  // profundidade (pai antes dos filhos), então o prefixo capturado aqui
+  // vale para as entradas seguintes.
+  const excludedDirPrefixes: string[] = [];
+
   for (const entry of entries) {
-    if (signal?.aborted) return;
+    if (signal?.aborted) break;
 
     // Compute the path RELATIVE to the source root for exclude matching.
     // The Rust command returns each entry's rel_path computed against ITS
@@ -129,10 +182,19 @@ async function walkOneFolder(
     // we want for matching against a global exclude list.
     const entryRel = normalizeRelativePath(entry.rel_path || "");
 
+    // Filho de uma pasta já excluída? Qualquer nível. Sem isto, um
+    // padrão de usuário como `privado` ou `Documentos/confidencial`
+    // excluía só o diretório e os arquivos dentro dele eram enviados.
+    if (excludedDirPrefixes.some((p) => entryRel.startsWith(p))) {
+      continue;
+    }
+
     if (entry.is_dir) {
       if (directoryShouldBeExcluded(entryRel, excludes)) {
-        continue; // don't recurse; Rust already gave us the children but
-                  // we filter them below by abs_path prefix
+        // Registra como prefixo de subtree para derrubar os filhos — o
+        // Rust já nos deu a lista plana, não há recursão para pular.
+        excludedDirPrefixes.push(entryRel + "/");
+        continue;
       }
       // Children of this dir are returned by Rust under the same call
       // (it walks recursively in one shot). We don't need to recurse
@@ -162,11 +224,17 @@ async function walkOneFolder(
 
   // Dedupe by absPath — defensive in case the Rust command returned the
   // same file via multiple paths (e.g. trailing-slash quirks).
+  //
+  // Scoped to THIS root's slice (`startIdx`): a previous root may legitimately
+  // hold a file with the same path, and deduping across roots would silently
+  // drop it from the backup.
   const seen = new Set<string>();
-  for (let i = out.length - 1; i >= 0; i--) {
+  for (let i = out.length - 1; i >= startIdx; i--) {
     if (seen.has(out[i].absPath)) out.splice(i, 1);
     else seen.add(out[i].absPath);
   }
+
+  return true;
 }
 
 /**

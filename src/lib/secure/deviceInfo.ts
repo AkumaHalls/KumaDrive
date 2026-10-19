@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * Device identity helpers.
  *
  * Detects the host OS and produces a human-readable device name for the
@@ -43,7 +43,7 @@ const OS_LABEL: Record<OS, string> = {
 
 /**
  * Human-readable device name shown in the backend's device list and the
- * Settings â†’ Plan & Devices panel. Example: "KumaDrive Desktop on macOS".
+ * Settings → Plan & Devices panel. Example: "KumaDrive Desktop on macOS".
  */
 export function getDeviceName(): string {
   return `KumaDrive Desktop on ${OS_LABEL[detectOS()]}`;

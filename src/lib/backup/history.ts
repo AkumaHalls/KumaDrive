@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * Channel-side snapshot history reader.
  *
  * Reads `kumadrive_snapshot_v1` text messages from the Telegram storage
@@ -7,7 +7,7 @@
  * 5s-timeout fetch, in-memory filter+parse, never throws on partial data.
  *
  * Used by `useActivityLog` to surface snapshot metadata in the Settings
- * â†’ Plan & Devices â†’ Activity panel alongside the audit-log rows from
+ * → Plan & Devices → Activity panel alongside the audit-log rows from
  * `/api/backup/history`.
  *
  * Snapshots are metadata-only per the user's design choice for v1 — they

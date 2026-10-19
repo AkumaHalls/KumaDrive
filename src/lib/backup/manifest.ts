@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * Device backup — incremental-upload manifest.
  *
  * The walker produces a flat file list. Before uploading, the runner
@@ -159,7 +159,7 @@ export interface BackupManifest {
   deviceOs: string;
   /** Unix-ms timestamp of the most recent run (null = never run). */
   lastRunAt: number | null;
-  /** Map of absolute local path â†’ ManifestEntry. */
+  /** Map of absolute local path → ManifestEntry. */
   entries: Record<string, ManifestEntry>;
 }
 
@@ -238,7 +238,16 @@ async function migrateLegacyManifest(): Promise<string | null> {
       return null;
     }
     const count = Object.keys(parsed.entries ?? {}).length;
-    await saveManifest(parsed);
+    // `saveManifest` passou a relançar (engolir fazia o runner reenviar
+    // tudo indefinidamente sem nunca avisar). Por isso a gravação tem o
+    // SEU próprio catch: misturada com o do `JSON.parse`, uma falha de
+    // escrita no vault era logada como "parse failed", apontando quem
+    // for depurar a perda do manifesto para o lugar errado.
+    try {
+      await saveManifest(parsed);
+    } catch (saveErr) {
+      console.warn("[backup.manifest] legacy manifest SAVE failed; migration incomplete:", saveErr);
+    }
     console.info(`[backup.manifest] migrated ${count} entries from ${LEGACY_MANIFEST_KEY}`);
     return raw;
   } catch (err) {
@@ -247,7 +256,19 @@ async function migrateLegacyManifest(): Promise<string | null> {
   }
 }
 
-/** Persist the manifest. Atomic-ish: writes via vault (overwrite). */
+/**
+ * Persist the manifest. Atomic-ish: writes via vault (overwrite).
+ *
+ * Relança o erro em vez de engolir. O runner chama isto depois de CADA
+ * upload bem-sucedido; sem relançar, uma falha de escrita era tratada
+ * como sucesso, o runner contava o arquivo como enviado e devolvia
+ * `status: "success"`. No run seguinte o diff não conhecia o arquivo e
+ * re-enviava — indefinidamente. O usuário via "Backup concluído — N
+ * enviados" para sempre enquanto o canal enchia de duplicatas, sem
+ * nenhum aviso de que a persistência estava falhando.
+ *
+ * `@throws` o erro original do invoke.
+ */
 export async function saveManifest(manifest: BackupManifest): Promise<void> {
   try {
     await invoke("save_vault_value", {
@@ -258,7 +279,8 @@ export async function saveManifest(manifest: BackupManifest): Promise<void> {
     // the next run will read the new value, which is well-formed.
     if (manifestWasCorrupt) resetManifestCorrupt();
   } catch (err) {
-    console.error("[backup.manifest] save failed (non-fatal):", err);
+    console.error("[backup.manifest] save failed:", err);
+    throw err;
   }
 }
 
@@ -358,7 +380,7 @@ export function recordUpload(
 // ---------------------------------------------------------------------------
 
 /**
- * Extension â†’ MIME map. Mirrors `getMimeFromExtension` in uploadManager.ts
+ * Extension → MIME map. Mirrors `getMimeFromExtension` in uploadManager.ts
  * (kept as a separate copy because that file is browser-side and we want
  * this one usable from any context, including the bootstrap which doesn't
  * import uploadManager).
@@ -400,7 +422,7 @@ export function guessMimeFromName(fileName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Manifest â†’ TeleFile conversion
+// Manifest → TeleFile conversion
 // ---------------------------------------------------------------------------
 
 /**

@@ -1,4 +1,4 @@
-﻿﻿import { Api } from "telegram";
+﻿import { Api } from "telegram";
 import { getClient } from "../telegram/client";
 import { TeleFile } from "../types";
 import { useFileStore } from "../../stores/fileStore";
@@ -12,25 +12,79 @@ import { filterJunkFiles } from "./fileSanitizer";
 /**
  * Deterministic folder id from a full virtual path.
  *
- * Same path â†’ same id, every cold start. Replaces the old `healed_<random>`
+ * Same path → same id, every cold start. Replaces the old `healed_<random>`
  * scheme that produced duplicate folder entries on every bootstrap (Bug 1 in
- * the plan). Folders created via `createFolder` keep their original random id
- * for backwards compatibility — the dedupe pass on recovery collapses them
- * to the canonical `folder_<hash>` only if duplicates exist.
+ * the plan).
  *
- * Slashes, dots, and unicode are preserved in the base64 — the id is an
- * opaque internal token, never shown to users. Length cap protects against
- * pathological paths.
+ * `createFolder` TAMBÉM usa esta função (via `useFileActions`) — não gera
+ * mais id aleatório. Entradas antigas com id aleatório ou `folder_<base64>`
+ * truncado continuam funcionando: `collapseDuplicateFolders` casa pastas
+ * pelo FULL PATH (não por id) e colapsa duplicatas para a de menor id.
+ *
+ * The id is an opaque internal token, never shown to users.
  */
 export function folderIdForPath(fullPath: string): string {
   const normalized = fullPath === "/" ? "/" : fullPath.replace(/\/+$/, "");
-  // btoa is available in WebView; full Unicode â†’ percent-encode first.
-  const encoded = btoa(
+  // Hash FNV-1a de 64 bits sobre o caminho INTEIRO.
+  //
+  // A versão anterior fazia `btoa(...).slice(0, 48)` — 48 chars base64
+  // são 36 BYTES, então dois caminhos que compartilhavam os primeiros 36
+  // bytes recebiam O MESMO id. Não é exótico: o root do backup é
+  // "/KumaDrive Backups/<device>/" (19..43 bytes conforme o nome da
+  // máquina) e `sanitizeFolderSegment` vai até 64. Com um device de nome
+  // >= 18 chars, TODAS as pastas irmãs sob o root colidiam. loadIndex
+  // indexa por `f.id`, então só uma sobrevivia; `reconstructMissingFolders`
+  // recriava as outras no próximo cold start com o MESMO id — e elas
+  // perdiam de novo. Subárvores inteiras ficavam inalcançáveis, e
+  // rename/move casavam com a pasta errada (useFileActions casa por id).
+  //
+  // O hash cobre o caminho inteiro, então colisão exige 2^64 caminhos.
+  // Determinístico entre cold starts, como o esquema antigo.
+  //
+  // Migração é segura: `collapseDuplicateFolders` colapsa DUAS entradas
+  // de pasta pelo mesmo FULL PATH, mantendo a de menor id. Entradas
+  // antigas (id truncado) e novas (id com hash) convergem sozinhas no
+  // primeiro heal, e `findFoldersByPath` — usado por move/rename — casa
+  // por caminho, não por id.
+  const hash = fnv1a64(normalized);
+  // `encodeURIComponent` → percent-encoding antes do btoa garante que
+  // unicode não estoure o charset do WebView; mantido só como sufixo
+  // legível para depuração.
+  const readable = btoa(
     encodeURIComponent(normalized).replace(/%([0-9A-F]{2})/g, (_, h) =>
       String.fromCharCode(parseInt(h, 16))
     )
-  );
-  return `folder_${encoded.slice(0, 48)}`;
+  ).slice(0, 8);
+  return `folder_${hash}_${readable}`;
+}
+
+/**
+ * Hash de 64 bits no espírito FNV-1a, em hex de 16 dígitos. Síncrono e
+ * sem dependências — `crypto.subtle` é assíncrono e o WebView do Tauri só
+ * o expõe em contexto seguro, o que nem sempre é o caso aqui.
+ *
+ * Rótulo honesto: NÃO é FNV-1a canônico. Faço DUAS rodadas xor+mul por
+ * caractere (byte baixo e byte alto), então para ASCII o PRIME é aplicado
+ * duas vezes por char. O canônico usa um byte por rodagem. A diferença não
+ * altera as propriedades que importam aqui: determinística, saída sempre
+ * em [0, 2^64) (máscara após cada mul, BigInt sempre positivo), e 16
+ * dígitos após o `padStart` (o `padStart` é necessário — há valores com
+ * 15 dígitos crus, ex.: "a" → `089be207b544f1e4`).
+ */
+function fnv1a64(input: string): string {
+  const OFFSET = 0xcbf29ce484222325n;
+  const PRIME = 0x100000001b3n;
+  const MASK = 0xffffffffffffffffn;
+  let hash = OFFSET;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i) & 0xff);
+    hash = (hash * PRIME) & MASK;
+    // Rodada extra para o byte alto do char, senão unicode que difere só
+    // acima de 0xff produziria a mesma hash.
+    hash ^= BigInt(input.charCodeAt(i) >>> 8);
+    hash = (hash * PRIME) & MASK;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
 
 /**
@@ -88,36 +142,72 @@ export function dedupeByMessageId(files: TeleFile[]): TeleFile[] {
  * (it needs the parent path, which `name` alone doesn't carry).
  */
 export function dedupeByContentKey(files: TeleFile[]): TeleFile[] {
-  const byContentKey = new Map<string, TeleFile>();
   const folders: TeleFile[] = [];
+  // Agrupamento por FAMÍLIA: todas as entradas que compartilham
+  // folderPath::name::size. A versão anterior comparava sempre contra a
+  // entrada da chave BASE, então a entrada sufixada (`key::msgId`) nunca
+  // mais era relida — e a dedupe escapava em cascata.
+  const families = new Map<string, TeleFile[]>();
   for (const f of files) {
     if (!f.messageId || f.messageId === 0 || isFolderMime(f.mime)) {
       folders.push(f);
       continue;
     }
-    // Use the FOLDER PATH the file lives in (not getFolderFullPath — that's
-    // for folders). Two files in the same folder with the same name and size
-    // are still considered duplicates here: this collapses backup retries
-    // and concurrent uploads of the same source file.
     const parent = !f.folderPath || f.folderPath === "/" ? "" : f.folderPath.replace(/\/+$/, "");
     const key = `${parent}::${f.name}::${f.size}`;
-    const existing = byContentKey.get(key);
-    if (!existing) {
-      byContentKey.set(key, f);
-      continue;
-    }
-    // Last-write-wins; tie-break by larger messageId (newer Telegram msg).
-    const newer =
-      f.uploadedAt > existing.uploadedAt
-        ? f
-        : f.uploadedAt < existing.uploadedAt
-        ? existing
-        : f.messageId > existing.messageId
-        ? f
-        : existing;
-    byContentKey.set(key, newer);
+    const family = families.get(key);
+    if (family) family.push(f);
+    else families.set(key, [f]);
   }
-  return [...folders, ...byContentKey.values()];
+
+  // JANELA DE TEMPO — a correção que impede perda de arquivo legítimo.
+  //
+  // Esta dedupe existe para UM caso: o `sendFile` dá timeout mas a
+  // mensagem CHEGA ao Telegram, e o retry cria um segundo blob para o
+  // mesmo arquivo. Nesse cenário as duas entradas são idênticas e foram
+  // criadas a SEGUNDOS de distância.
+  //
+  // Comparar só nome+tamanho+pasta colapsava DOIS ARQUIVOS LEGÍTIMOS:
+  // você sobe notas.txt v1 (10 bytes) e depois v2 (10 bytes) na mesma
+  // pasta — no próximo cold start um deles sumia do índice, e o blob
+  // continuava no canal, órfão e sem referência.
+  //
+  // O erro da minha versão anterior era comparar SEMPRE contra a entrada
+  // da chave base. Ex.: base 10:00 → re-upload distinto 10:05 (fica em
+  // `key::m2`) → o retry REAL desse 10:05, às 10:05:30, comparava com a
+  // base (10:00) → fora da janela → ia para `key::m3`. O par de retry
+  // que a dedupe existe para matar sobrevivia como duplicata na UI.
+  //
+  // A correção é encadear: ordeno a família por `uploadedAt` e comparo
+  // cada entrada com a REPRESENTATIVA do grupo corrente, que avança para
+  // a entrada mais recente. Assim 10:00 → 10:05 (distinto, grupo novo) →
+  // 10:05:30 (retry do 10:05, colapsa nele). Um retry de upload acontece
+  // em segundos; re-upload intencional em minutos ou horas.
+  const RETRY_WINDOW_MS = 120_000;
+  const kept: TeleFile[] = [];
+  for (const family of families.values()) {
+    family.sort((a, b) => {
+      if (a.uploadedAt !== b.uploadedAt) return a.uploadedAt - b.uploadedAt;
+      // Empate de tempo: messageId maior = mensagem mais nova no Telegram.
+      return (a.messageId ?? 0) - (b.messageId ?? 0);
+    });
+    let representative = family[0];
+    for (let i = 1; i < family.length; i++) {
+      const f = family[i];
+      if (Math.abs(f.uploadedAt - representative.uploadedAt) > RETRY_WINDOW_MS) {
+        // Upload distinto — grupo novo. O anterior já está em `kept`.
+        kept.push(representative);
+        representative = f;
+        continue;
+      }
+      // Dentro da janela: trata-se do retry do representante. Fica o mais
+      // recente (ordenados, então `f` vence; o tie-break de messageId já
+      // foi aplicado no sort).
+      representative = f;
+    }
+    kept.push(representative);
+  }
+  return [...folders, ...kept];
 }
 
 /**
@@ -217,6 +307,14 @@ class Mutex {
       return release;
     } catch (err) {
       clearTimeout(timeoutId);
+      // O `this.acquire()` acima continua pendente e vai resolver COM um
+      // `release`. Sem a linha abaixo, esse `release` nunca seria chamado:
+      // `this.promise` ficaria encadeado numa promise que ninguém resolve,
+      // e TODOS os acquires futuros travariam para sempre — um deadlock
+      // silencioso em vez da falha temporária que o timeout prometia.
+      //
+      // Devolvemos o lock assim que ele for adquirido, ignorando o erro.
+      void releasePromise.then((release) => release()).catch(() => {});
       throw err;
     }
   }
@@ -352,7 +450,11 @@ export function reconstructMissingFolders(
   };
 }
 
-async function healAndSave(channelId: string, files: TeleFile[]): Promise<TeleFile[]> {
+async function healAndSave(
+  channelId: string,
+  files: TeleFile[],
+  persist: boolean = true
+): Promise<TeleFile[]> {
   // First, strip all system and git junk (.DS_Store, git objects, hooks, refs, etc.)
   const cleanSource = filterJunkFiles(files);
   const hadJunk = cleanSource.length !== files.length;
@@ -364,7 +466,7 @@ async function healAndSave(channelId: string, files: TeleFile[]): Promise<TeleFi
   // random metadata. Doing it this way means duplicate folders from previous
   // cold starts collapse to one canonical entry before they hit the queue.
   const { healedFiles, changed } = reconstructMissingFolders(cleanSource, channelId);
-  // Order: dedupeByMessageId â†’ dedupeByContentKey â†’ collapseDuplicateFolders.
+  // Order: dedupeByMessageId → dedupeByContentKey → collapseDuplicateFolders.
   // - dedupeByMessageId handles single-message races (same Telegram message
   //   represented twice).
   // - dedupeByContentKey handles retry pairs (two distinct Telegram messages
@@ -372,6 +474,14 @@ async function healAndSave(channelId: string, files: TeleFile[]): Promise<TeleFi
   // - collapseDuplicateFolders finally handles folder-entry duplicates by
   //   full path.
   const cleaned = collapseDuplicateFolders(dedupeByContentKey(dedupeByMessageId(healedFiles)));
+  if (!persist) {
+    // Modo somente-leitura: o caller sabe que a visão do índice é
+    // BEST-EFFORT (chunks de epochs diferentes mesclados). Sanear é útil
+    // para a UI, mas GRAVAR faria o set truncado virar a fonte da
+    // verdade no próximo cold start — perda permanente a partir de uma
+    // falha transitória.
+    return cleaned;
+  }
   if (changed || hadJunk || cleaned.length !== files.length) {
     console.log(
       `[metadataStore] Healed ${hadJunk ? `(removed ${files.length - cleanSource.length} junk) ` : ""}${
@@ -562,6 +672,28 @@ export function pickCoherentIndexSet(
  *   - mixed-version channels: Frankenstein-merging across epochs is
  *     avoided — only fully-coherent sets are considered.
  */
+/**
+ * True quando o último `loadIndex` escolheu uma epoch COERENTE; false
+ * quando caiu no merge best-effort (chunks de epochs diferentes).
+ *
+ * Exportado para o `bootstrap`: ele grava o estado mesclado no Telegram
+ * via `fireAndForgetSaveIndex`, e gravar um merge best-effort o tornaria
+ * uma epoch coerente de msgId MAIS ALTO — ressuscitando arquivos
+ * deletados e apagando chunks antigos que estavam fora da janela de
+ * leitura. O `persist=false` do `healAndSave` só protegia a função; sem
+ * este flag o próprio caller contornava a garantia.
+ *
+ * Lido imediatamente após `loadIndex` retornar. Não é thread-safe num
+ * sentido estrito, mas o JS é single-threaded e nenhum `await` separa a
+ * chamada da leitura no `bootstrap`.
+ */
+let lastIndexSeenCoherent = true;
+
+/** Ver `lastIndexSeenCoherent`. True também quando o canal é genuinamente vazio. */
+export function wasLastIndexCoherent(): boolean {
+  return lastIndexSeenCoherent;
+}
+
 export async function loadIndex(channelId: string): Promise<TeleFile[]> {
   const client = getClient();
   let peer: any;
@@ -576,6 +708,13 @@ export async function loadIndex(channelId: string): Promise<TeleFile[]> {
   // Load from BOTH pinned and recent, then let pickCoherentIndexSet pick
   // the most-recent coherent set across all sources.
   let allMsgs: any[] = [];
+  // Distingue "o canal está genuinamente vazio" de "não consegui ler o
+  // índice". Sem isto, um timeout/FLOOD_WAIT nas duas leituras devolvia
+  // `[]` — indistinguível de um canal vazio — e o `uploadManager` gravava
+  // um índice contendo SÓ o arquivo novo, apagando do Drive todo o resto
+  // que o usuário tinha.
+  let readsFailed = 0;
+
   try {
     const pinned = await withTimeout(
       client.getMessages(peer, {
@@ -587,6 +726,7 @@ export async function loadIndex(channelId: string): Promise<TeleFile[]> {
     );
     allMsgs = allMsgs.concat(pinned);
   } catch (pinnedErr) {
+    readsFailed++;
     console.warn("[metadataStore] Failed to load pinned messages, falling back to scan:", pinnedErr);
   }
 
@@ -598,30 +738,97 @@ export async function loadIndex(channelId: string): Promise<TeleFile[]> {
     );
     allMsgs = allMsgs.concat(recent);
   } catch (scanErr) {
+    readsFailed++;
     console.warn("[metadataStore] Failed to scan channel messages:", scanErr);
   }
 
   if (allMsgs.length === 0) {
+    // Nenhuma das leituras succeeded → não sabemos o estado do canal.
+    // Propagar é o comportamento seguro: o caller decide (e o
+    // uploadManager aborta o merge em vez de sobrescrever o índice).
+    // Zero mensagens COM o canal lido é um canal genuinamente vazio.
+    if (readsFailed > 0) {
+      throw new Error(
+        `Não foi possível ler o índice do canal (${readsFailed}/2 leituras falharam). ` +
+        `Pode ser instabilidade de rede ou rate limit do Telegram.`,
+      );
+    }
     console.error("[metadataStore] No messages loaded from channel");
+    // Canal genuinamente vazio = coerente (não é um merge de epochs
+    // quebradas). Gravar um estado vazio a partir daqui é correto.
+    lastIndexSeenCoherent = true;
     return [];
   }
 
   const chosenSet = pickCoherentIndexSet(allMsgs);
   if (!chosenSet) {
     console.warn(
-      `[metadataStore] No coherent index set found across ${allMsgs.length} message(s); falling back to best-effort merge.`
+      `[metadataStore] No coherent index set found across ${allMsgs.length} message(s); using best-effort merge WITHOUT persisting.`
     );
-    // Best-effort: dedup by file id across ALL parsed chunks.
+    // Best-effort: dedup by file id across ALL parsed chunks — chunks de
+    // epochs DIFERENTES. Isso pode ressuscitar arquivos deletados e omitir
+    // recentes, então é uma visão de conveniência, NÃO verdade.
+    //
+    // `persist=false` é a correção do pior caso desta função: a versão
+    // anterior chamava `healAndSave` normal, que ENFILEIRAVA a gravação
+    // desse merge. Um índice de 12 chunks com 5 faltando (FLOOD_WAIT no
+    // meio do envio) virava permanentemente "os 7 chunks que eu consegui
+    // ler" — ~40% dos arquivos desaparecendo para sempre, e agora com a
+    // truncagem como fonte da verdade. Nada é gravado até existir uma
+    // epoch coerente.
+    //
+    // `lastIndexSeenCoherent = false` propaga essa informação para fora
+    // da função. Sem isto, o próprio `bootstrap` contornava a garantia:
+    // recebia este merge e o gravava incondicionalmente via
+    // `fireAndForgetSaveIndex`, tornando-o uma epoch coerente de msgId
+    // MAIS ALTO — exatamente o que o `persist=false` prometia impedir.
+    // Qualquer chunk antigo fora da janela de leitura (100 pinned +
+    // 200 recent) era apagado para sempre, e arquivos deletados
+    // ressuscitavam.
+    lastIndexSeenCoherent = false;
+
     const allParsed = parseIndexMessages(allMsgs);
+
+    // Cursor anti-ressurreição. O ramo coerente logo abaixo seta o
+    // `lastIndexMsgId` a partir do max msgId dos CHUNKS DE ÍNDICE, e o
+    // best-effort precisa do MESMO tipo de medida — não o max de
+    // `allMsgs`. A diferença importa muito aqui.
+    //
+    // O cursor é o que a guarda anti-ressurreição do orphan scan
+    // (bootstrap.ts:223, exige `lastIndexMsgId > 0`) usa para decidir
+    // "mensagem nova desde o índice" → recuperar como órfão. Os órfãos
+    // MAIS PROVÁVEIS são exatamente os blobs posteriores ao último save
+    // de índice — o save falhou antes do app morrer, então esses blobs
+    // existem mas não estão em nenhum chunk. No ramo coerente esses
+    // blobs têm msgId > `maxChosenMsgId` e SÃO recuperados.
+    //
+    // Com o max de `allMsgs` (que inclui blobs), esses mesmos órfãos
+    // ficam `<= cursor` e o scan os PULAVA — trocando "ressuscitar
+    // deletados" por "não recuperar truncados". Pior: a supressão do
+    // save (item acima) faz a visão best-effort viver até existir uma
+    // epoch coerente, então esses arquivos ficariam invisíveis por mais
+    // tempo. O max dos chunks parseados mede "até onde o índice chegou",
+    // que é o que o cursor precisa expressar.
+    const maxParsedIndexMsgId = allParsed.reduce(
+      (max: number, c) => Math.max(max, c.msgId || 0),
+      0
+    );
+    if (maxParsedIndexMsgId > 0) {
+      useFileStore.getState().setLastIndexMsgId(maxParsedIndexMsgId);
+    }
+
     const byId = new Map<string, TeleFile>();
     for (const c of allParsed) {
       for (const f of c.files) byId.set(f.id, f);
     }
     return healAndSave(
       channelId,
-      collapseDuplicateFolders(dedupeByContentKey(dedupeByMessageId(Array.from(byId.values()))))
+      collapseDuplicateFolders(dedupeByContentKey(dedupeByMessageId(Array.from(byId.values())))),
+      false
     );
   }
+
+  lastIndexSeenCoherent = true;
 
   const maxChosenMsgId = chosenSet.reduce((max, c) => Math.max(max, c.msgId), 0);
   if (maxChosenMsgId > 0) {

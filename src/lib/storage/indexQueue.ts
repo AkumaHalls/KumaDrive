@@ -1,4 +1,4 @@
-﻿/**
+/**
  * IndexQueue — per-channel async FIFO queue that owns ALL index persistence
  * to Telegram. This is the single writer rule for the index per channelId.
  *
@@ -192,16 +192,6 @@ class ChannelQueue {
   private retryAttempt = 0;
   private lastError: any = null;
   private readonly channelId: string;
-  /**
-   * Message ids we just sent via the fallback path, with their expiry
-   * timestamps (ms since epoch). Telegram temp-restricts edits on a
-   * message for some window after `sendMessage` — calling `editMessage`
-   * on such a message returns `406: EDIT_MESSAGE_TEMP_RESTRICTED` and
-   * burns ~8s of timeout. We track recent sends so `commitOnce` knows
-   * to skip the edit attempt and go straight to fallback (delete + send
-   * fresh), which breaks the temp-restricted death-spiral.
-   */
-  private recentSentMessageIds: Map<number, number> = new Map();
 
   constructor(channelId: string) {
     this.channelId = channelId;
@@ -253,42 +243,7 @@ class ChannelQueue {
     this.retryingEntry = null;
     this.retryAttempt = 0;
     this.lastError = null;
-    this.recentSentMessageIds.clear();
     this.updateStoreState();
-  }
-
-  /**
-   * Records that `messageId` was just produced by a fallback `sendMessage`.
-   * `commitOnce` will refuse to edit it for the next `windowMs` milliseconds.
-   */
-  private markRecentlySent(messageId: number, windowMs: number = 60_000): void {
-    const expiresAt = Date.now() + windowMs;
-    this.recentSentMessageIds.set(messageId, expiresAt);
-  }
-
-  /**
-   * Drops expired entries from recentSentMessageIds.
-   * Called at the top of every `commitOnce` so the map doesn't grow forever.
-   */
-  private pruneRecentlySent(): void {
-    const now = Date.now();
-    for (const [id, expiresAt] of this.recentSentMessageIds) {
-      if (expiresAt <= now) this.recentSentMessageIds.delete(id);
-    }
-  }
-
-  /**
-   * Returns true if ANY of the given message ids is still in the
-   * recently-sent window. If true, `commitOnce` should skip the edit
-   * path and go straight to fallback (delete + send fresh).
-   */
-  private hasRecentlySent(messageIds: number[]): boolean {
-    if (messageIds.length === 0) return false;
-    this.pruneRecentlySent();
-    for (const id of messageIds) {
-      if (this.recentSentMessageIds.has(id)) return true;
-    }
-    return false;
   }
 
   private updateStoreState(): void {
@@ -360,7 +315,30 @@ class ChannelQueue {
               this.retryAttempt = 0;
               entry.reject(err);
               this.updateStoreState();
-              return;
+              // `continue`, não `break` — e este detalhe é o fix REAL. O
+              // comentário anterior (que eu escrevi) dizia "`break` sai do
+              // while; o código abaixo vê que ainda há `pending` e faz o
+              // drain continuar". Não existe código abaixo: o `while` é o
+              // último bloco do `try`, e depois dele só há o `finally` —
+              // que apenas nulla `inflight`. Ou seja, `break` e `return`
+              // eram funcionalmente IDÊNTICOS, e a promessa do comentário
+              // não se cumpría.
+              //
+              // O cenário que ficava preso: `commitOnce` A falha com hard
+              // error enquanto o usuário dispara a ação B. O `enqueue` de B
+              // chamou `drain()` e caiu no early-return de `if
+              // (this.inflight) return` — ninguém mais chama `drain`. Com
+              // `break`, A era rejeitada, `inflight` virava null, e B
+              // ficava em `pending` para SEMPRE: a promise de B nunca
+              // resolvia nem rejeitava, então o `finally` de
+              // `applyOptimistic` (que faz `setSyncing(false)`) nunca
+              // rodava, e a barra ficava em "Salvando…" indefinidamente.
+              //
+              // `continue` re-avalia a condição do `while`, que drena a
+              // entrada pendente na hora. Terminação garantida: cada
+              // iteração consome `this.pending` antes do commit, então não
+              // há como voltar ao topo sem consumir uma entrada nova.
+              continue;
             }
             // Transient: scheduleRetry increments retryAttempt internally
             // and may itself trigger a drain when the timer fires. We do
@@ -507,12 +485,18 @@ class ChannelQueue {
     }
 
     // Pick the coherent set of chunks that represents the current state of
-    // the index. These are the message ids we'll edit or delete.
+    // the index.
+    //
+    // ATENÇÃO, pós-remoção do caminho de edição: `coherentSet` e `existing`
+    // abaixo NÃO são mais o alvo de exclusão. O delete do passo 3 usa
+    // `allMsgs` inteiro (qualquer chunk de índice que não seja recém-enviado).
+    // `existing` sobrevive apenas para o log INDEX_EXISTING_FOUND/NONE, que é
+    // o que faz um diagnóstico de "por que este commit reescreveu tudo"
+    // distinguir "já existia epoch coerente" de "era a primeira gravação".
     const coherentSet: ParsedIndexChunk[] | null = pickCoherentIndexSet(allMsgs);
 
-    // Build the `existing` list keyed off the coherent set's message ids.
-    // Map back from msgId â†’ original Telegram message object so we can
-    // call client.editMessage / client.deleteMessages with the full message.
+    // Map back from msgId → original Telegram message object, used only
+    // for the diagnostics below.
     const existingById = new Map<number, any>();
     for (const m of allMsgs) {
       if (m?.id != null) existingById.set(Number(m.id), m);
@@ -533,154 +517,38 @@ class ChannelQueue {
       }).catch(() => {});
     }
 
-    // 2. If we have existing messages, edit them in place. This is the
-    //    happy path and consumes no extra SendMessage / pin quota.
+    // 2. SEND-FIRST, DELETE-LATER — esta é a decisão de atomicidade do
+    //    índice inteiro, e ela inverte a ordem anterior (apagar-antes-de-
+    //    enviar).
     //
-    //    Smart-skip: if ANY of the existing messages was sent by us in
-    //    the last 60 seconds (the temp-restricted window), skip the edit
-    //    entirely and go straight to fallback. Trying to edit such a
-    //    message returns `406: EDIT_MESSAGE_TEMP_RESTRICTED` after the
-    //    full 8-second timeout, which dominates the save latency and
-    //    burns a Telegram round-trip per chunk. Falling back to
-    //    delete+send is one round-trip per chunk and converges to a
-    //    usable state immediately.
-    if (existing.length > 0) {
-      const existingIds = existing.map((m: any) => Number(m.id));
-      if (this.hasRecentlySent(existingIds)) {
-        await invoke("log_vault_state", {
-          state: `INDEX_EDIT_SKIP reason=recently_sent ids=${existingIds.join(",")}`,
-        }).catch(() => {});
-        await invoke("log_vault_state", {
-          state: "INDEX_FALLBACK_SEND reason=recently_sent",
-        }).catch(() => {});
-        // Fall through to fallback path below.
-      } else if (existing.length !== chunks.length) {
-        // Mismatched chunk count (e.g. the previous coherent set had 3 chunks
-        // but the new state needs 4, or vice versa). We can't safely edit in
-        // place — fall through to atomic delete+send.
-        await invoke("log_vault_state", {
-          state: `INDEX_FALLBACK_SEND reason=chunk_count_mismatch existing=${existing.length} new=${chunks.length}`,
-        }).catch(() => {});
-      } else {
-        let allEditsOk = true;
-        for (let i = 0; i < chunks.length; i++) {
-          const payload = {
-            kumadrive_index: true,
-            version: 1,
-            chunkIndex: i,
-            totalChunks: chunks.length,
-            files: chunks[i],
-          };
-          const text = JSON.stringify(payload);
-
-          try {
-            await withTimeout(
-              client.editMessage(peer, {
-                message: existing[i]?.id,
-                text,
-              }),
-              EDIT_TIMEOUT_MS,
-              `editMessage(chunk ${i})`
-            );
-          } catch (err: any) {
-            // Single edit failure: bail to fallback send for *all* chunks.
-            allEditsOk = false;
-            await invoke("log_vault_state", {
-              state: `INDEX_EDIT_FAIL chunk=${i} reason=${err?.message ?? err}`,
-            }).catch(() => {});
-            break;
-          }
-        }
-
-        if (allEditsOk) {
-          // Delete extras if the new index shrank.
-          if (existing.length > chunks.length) {
-            const extraIds = existing.slice(chunks.length).map((m: any) => m.id);
-            try {
-              await withTimeout(
-                client.deleteMessages(peer, extraIds, { revoke: true }),
-                DELETE_TIMEOUT_MS,
-                "deleteMessages(extra chunks)"
-              );
-            } catch (err: any) {
-              // Non-fatal — extras will get cleaned up on next save or load.
-              await invoke("log_vault_state", {
-                state: `INDEX_DELETE_EXTRAS_FAIL reason=${err?.message ?? err}`,
-              }).catch(() => {});
-            }
-          }
-          await invoke("log_vault_state", {
-            state: `INDEX_EDIT_OK chunks=${chunks.length} files=${state.length}`,
-          }).catch(() => {});
-          return;
-        }
-
-        // Edits failed mid-way â†’ fall through to full re-send below.
-        await invoke("log_vault_state", {
-          state: "INDEX_FALLBACK_SEND reason=edit_failed",
-        }).catch(() => {});
-      }
-    } else {
-      await invoke("log_vault_state", {
-        state: "INDEX_FALLBACK_SEND reason=no_existing_index",
-      }).catch(() => {});
-    }
-
-    // 3. Fallback path: ATOMIC delete-old, then send-fresh. Pin is best-effort.
+    //    Por que a ordem antiga perdia dados: ela APAGAVA os chunks velhos
+    //    e depois enviava os novos. Se o envio falhasse no chunk k de N
+    //    (FLOOD_WAIT, timeout, processo morto), o canal ficava com uma
+    //    epoch INCOMPLETA e nada mais. `pickCoherentIndexSet` não achava
+    //    epoch coerente, `loadIndex` caía no merge best-effort — e
+    //    `healAndSave` GRAVAVA esse set truncado de volta. Uma falha
+    //    transitória virava perda permanente de ~40% dos arquivos.
     //
-    //    Why atomic: previously we sent fresh messages FIRST, then deleted
-    //    old ones best-effort. If delete failed (FLOOD_WAIT), the old
-    //    pinned messages stayed around, AND the new sends were not pinned.
-    //    On the next restart, loadIndex would read the old pinned set and
-    //    return the OLD (pre-move) state — silently losing the user's
-    //    recent actions.
+    //    Por que enviar-primeiro é seguro: `pickCoherentIndexSet` escolhe
+    //    a epoch completa com a msgId MAIS ALTA, e msgId do Telegram é
+    //    estritamente crescente. Logo:
     //
-    //    Now: delete old first (synchronous, with retry; surface failures
-    //    as transient so the queue retries), THEN send fresh. Pin is
-    //    truly optional because loadIndex no longer depends on pin status
-    //    (it picks the newest coherent set by message id).
-    const oldIds = existing.map((m: any) => Number(m.id));
-    if (oldIds.length > 0) {
-      let deleteOk = false;
-      let lastDeleteErr: any = null;
-      for (let attempt = 1; attempt <= 3 && !deleteOk; attempt++) {
-        try {
-          await withTimeout(
-            client.deleteMessages(peer, oldIds, { revoke: true }),
-            DELETE_TIMEOUT_MS,
-            `deleteMessages(legacy attempt=${attempt})`
-          );
-          deleteOk = true;
-        } catch (err: any) {
-          lastDeleteErr = err;
-          await invoke("log_vault_state", {
-            state: `INDEX_DELETE_OLD_FAIL attempt=${attempt} reason=${err?.message ?? err}`,
-          }).catch(() => {});
-          // Flood-wait: let the queue handle retry via the standard
-          // transient-error path. Anything else: back off and retry once.
-          const flood = parseFloodWaitSeconds(err);
-          if (flood != null) {
-            throw err; // transient â†’ outer queue retry
-          }
-          if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 500 * attempt));
-          }
-        }
-      }
-      if (!deleteOk) {
-        await invoke("log_vault_state", {
-          state: `INDEX_DELETE_OLD_GIVE_UP err=${lastDeleteErr?.message ?? lastDeleteErr}`,
-        }).catch(() => {});
-        // We cannot guarantee freshness if old messages are still there.
-        // Bubble up as transient so the queue retries with backoff;
-        // the user's optimistic state stays and we keep trying.
-        throw lastDeleteErr;
-      }
-      await invoke("log_vault_state", {
-        state: `INDEX_DELETE_OLD_OK count=${oldIds.length}`,
-      }).catch(() => {});
-    }
-
+    //      - envio parcial → a epoch nova está INCOMPLETA → é ignorada →
+    //        a epoch velha (completa) continua sendo a fonte da verdade.
+    //        Nada se perde, e o retry reconstrói.
+    //      - envio completo → a epoch nova tem msgIds maiores → vence.
+    //        Só ENTÃO apagamos a velha.
+    //      - falha no delete → epoch velha sobra como lixo, mas continua
+    //        perdendo a comparação por msgId. Lixo, não corrupção.
+    //
+    //    Este mesmo raciocínio torna o antigo caminho de EDIÇÃO-in-place
+    //    desnecessário (e foi removido). Ele editava os chunks no MESMO
+    //    msgId: um edit que falhava no chunk 2 deixava chunks 0-1 com
+    //    conteúdo novo e 2-3 com velho, todos com totalChunks/chunkIndex
+    //    coerentes — e `findMostRecentCoherentEpoch` aceitava aquele
+    //    Frankenstein como uma epoch completa e válida. Não há como
+    //    "desfazer" um edit no Telegram, então aquele caminho não tinha
+    //    como convergir sozinho.
     const newMsgIds: number[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const payload = {
@@ -701,8 +569,6 @@ class ChannelQueue {
         );
         msgId = Number((result as any).id);
         newMsgIds.push(msgId);
-        // Mark as recently-sent so the next commit skips edits on these.
-        this.markRecentlySent(msgId);
       } catch (err) {
         throw err;
       }
@@ -732,9 +598,108 @@ class ChannelQueue {
     }
 
     await invoke("log_vault_state", {
-      state: `INDEX_FALLBACK_OK chunks=${chunks.length} files=${state.length} msgIds=[${newMsgIds.join(",")}]`,
+      state: `INDEX_SEND_OK chunks=${chunks.length} files=${state.length} msgIds=[${newMsgIds.join(",")}]`,
     }).catch(() => {});
+
+    // 3. TODA a epoch nova está no Telegram. Agora sim apagamos os chunks
+    //    antigos — inclusive os de epochs velhas órfãs que um delete
+    //    falhado deixou para trás. A correção aqui também limpa o lixo:
+    //    apagamos QUALQUER mensagem de índice em `allMsgs` que não seja
+    //    uma das que acabamos de enviar.
+    //
+    //    Filtro EXATO, não substring. `.text` de uma mensagem de mídia é
+    //    o CAPTION (GramJS message.js: `get text() { return this.message }`),
+    //    e o caption de arquivo é `kumadrive_file:{"folder":"..."}`.
+    //    Com `includes("kumadrive_index")` — como escrevi nesta versão —
+    //    um usuário que criasse uma pasta chamada "kumadrive_index" e
+    //    subisse um arquivo nela teria o msgId DELE incluído em
+    //    `staleIds` a cada commit, e o `deleteMessages(..., {revoke:true})`
+    //    apagaria os BYTES do arquivo do Telegram. O índice continuaria
+    //    referenciando aquele messageId: arquivo visível na UI, 404 no
+    //    download, perda permanente.
+    //
+    //    Exigimos o prefixo EXATO do payload de índice. `JSON.stringify`
+    //    produz `{"kumadrive_index":true,...` (chave numerada primeiro,
+    //    sem espaços), então este prefixo só casa com chunks reais:
+    //      - caption de arquivo  → `kumadrive_file:{...}`        não casa
+    //      - pasta "kumadrive_index" com arquivo dentro → caption é
+    //        `kumadrive_file:{"folder":"kumadrive_index"}`       não casa
+    //    `parseIndexMessages` continua protegido pelo `JSON.parse`; o
+    //    delete agora também tem garantia de identidade.
+    const newIdSet = new Set(newMsgIds);
+    const staleIds = allMsgs
+      .filter(
+        (m: any) =>
+          m?.id != null && typeof m?.text === "string" && isIndexChunkText(m.text)
+      )
+      .map((m: any) => Number(m.id))
+      .filter((id: number) => Number.isFinite(id) && !newIdSet.has(id));
+
+    if (staleIds.length > 0) {
+      let deleteOk = false;
+      let lastDeleteErr: any = null;
+      // Distingue o FLOOD_WAIT engolido do give-up de erro normal no log
+      // final — sem isto o mesmo evento gerava DOIS logs
+      // (INDEX_DELETE_OLD_FLOOD_WAIT swallowed + INDEX_DELETE_OLD_GIVE_UP),
+      // deixando o diagnóstico ambíguo.
+      let floodWaitSwallowed = false;
+      for (let attempt = 1; attempt <= 3 && !deleteOk; attempt++) {
+        try {
+          await withTimeout(
+            client.deleteMessages(peer, staleIds, { revoke: true }),
+            DELETE_TIMEOUT_MS,
+            `deleteMessages(stale attempt=${attempt})`
+          );
+          deleteOk = true;
+        } catch (err: any) {
+          lastDeleteErr = err;
+          await invoke("log_vault_state", {
+            state: `INDEX_DELETE_OLD_FAIL attempt=${attempt} reason=${err?.message ?? err}`,
+          }).catch(() => {});
+          // FLOOD_WAIT aqui NÃO pode lançar, e é o ponto sutil desta
+          // versão. O envio da epoch nova JÁ terminou (o passo acima só
+          // roda depois de `INDEX_SEND_OK`). Lançar faria o queue
+          // reenviar a epoch INTEIRA por causa do LIXO — n×send + n×pin
+          // ×5 tentativas, estourando o cap — e o `enqueueSave`
+          // rejeitaria, fazendo o `applyOptimistic` DESFAZER na UI uma
+          // ação que já está gravada no Telegram. Daí a próxima ação
+          // gravaria o estado revertido: um "undo" fantasma.
+          //
+          // A correção do commit depende só de a epoch nova ter msgId
+          // maior, o que o envio acima já garantiu. Lixo que sobra perde
+          // a seleção por msgId — nunca corrupção. Então engolimos.
+          if (parseFloodWaitSeconds(err) != null) {
+            floodWaitSwallowed = true;
+            await invoke("log_vault_state", {
+              state: `INDEX_DELETE_OLD_FLOOD_WAIT swallowed count=${staleIds.length} err=${err?.message ?? err}`,
+            }).catch(() => {});
+            break;
+          }
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 500 * attempt));
+          }
+        }
+      }
+      await invoke("log_vault_state", {
+        state: deleteOk
+          ? `INDEX_DELETE_OLD_OK count=${staleIds.length}`
+          : floodWaitSwallowed
+          ? `INDEX_DELETE_OLD_PENDING count=${staleIds.length} reason=flood_wait lixo fica para o próximo commit`
+          : `INDEX_DELETE_OLD_GIVE_UP count=${staleIds.length} err=${lastDeleteErr?.message ?? lastDeleteErr}`,
+      }).catch(() => {});
+    }
   }
+}
+
+/**
+ * True quando o texto é EXATAMENTE um chunk de índice do KumaDrive.
+ *
+ * Guarda de segurança do `deleteMessages` do commit: impede apagar blobs
+ * de arquivo ou captions que apenas CONTENHAM o literal "kumadrive_index"
+ * (ex.: o nome de uma pasta). Ver o comentário do passo 3 em `commitOnce`.
+ */
+function isIndexChunkText(text: string): boolean {
+  return text.startsWith('{"kumadrive_index":true');
 }
 
 async function resolvePeerWithTimeout(client: any, channelId: string): Promise<any> {

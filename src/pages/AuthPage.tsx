@@ -1,4 +1,4 @@
-﻿﻿import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { AlertTriangle, Eye, EyeOff, Loader2, ArrowLeft, MessageSquare, Lock } from "lucide-react";
 import { Api } from "telegram";
@@ -13,10 +13,10 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Types ————————————————————————————————————————————————————————————————————
 type Step = "phone" | "otp" | "password" | "bootstrap";
 
-// â”€â”€â”€ Animated step indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Animated step indicator ——————————————————————————————————————————————————
 function StepDots({ current }: { current: Step }) {
   const visibleSteps: Step[] = ["phone", "otp", "password"];
   const currentIndex = visibleSteps.indexOf(current as any);
@@ -44,7 +44,7 @@ function StepDots({ current }: { current: Step }) {
   );
 }
 
-// â”€â”€â”€ Floating label input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Floating label input —————————————————————————————————————————————————————
 interface FloatingInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label: string;
   id: string;
@@ -104,7 +104,7 @@ function FloatingInput({ label, id, suffix, inputRef, className, ...props }: Flo
   );
 }
 
-// â”€â”€â”€ OTP digit box â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— OTP digit box ————————————————————————————————————————————————————————————
 interface OtpBoxProps {
   value: string;
   onChange: (val: string) => void;
@@ -161,7 +161,7 @@ function OtpBox({ value, onChange, onKeyDown, onPaste, inputRef, disabled, index
   );
 }
 
-// â”€â”€â”€ Error banner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Error banner —————————————————————————————————————————————————————————————
 function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="w-full flex gap-2.5 p-3.5 rounded-2xl border border-rose-200 bg-rose-50 dark:border-rose-900/40 dark:bg-rose-950/20 text-rose-700 dark:text-rose-300 text-xs animate-slide-up-fade">
@@ -171,7 +171,7 @@ function ErrorBanner({ message }: { message: string }) {
   );
 }
 
-// â”€â”€â”€ Primary action button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Primary action button ————————————————————————————————————————————————————
 function PrimaryButton({
   loading,
   loadingLabel,
@@ -217,7 +217,7 @@ function PrimaryButton({
   );
 }
 
-// â”€â”€â”€ Ghost back button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Ghost back button ————————————————————————————————————————————————————————
 function BackButton({ onClick, disabled, label }: { onClick: () => void; disabled?: boolean; label: string }) {
   return (
     <Button
@@ -233,7 +233,7 @@ function BackButton({ onClick, disabled, label }: { onClick: () => void; disable
   );
 }
 
-// â”€â”€â”€ Main AuthPage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Main AuthPage ————————————————————————————————————————————————————————————
 export default function AuthPage() {
   const navigate = useNavigate();
   const setSession = useAuthStore((state) => state.setSession);
@@ -245,6 +245,17 @@ export default function AuthPage() {
 
   // Step state
   const [step, setStep] = useState<Step>("phone");
+  // Versão dinâmica para o rodapé. O rodapé tinha `v0.1.1` hardcoded
+  // (mojibake + versão errada — AboutSection mostra 0.2.1 via getVersion).
+  const [appVersion, setAppVersion] = useState<string>("");
+  useEffect(() => {
+    let active = true;
+    void import("@tauri-apps/api/app")
+      .then((m) => m.getVersion())
+      .then((v) => { if (active) setAppVersion(v); })
+      .catch(() => {/* rodapé fica sem versão */});
+    return () => { active = false; };
+  }, []);
   const [phone, setPhone] = useState("");
   const [phoneCodeHash, setPhoneCodeHash] = useState("");
   const [otp, setOtp] = useState<string[]>(["", "", "", "", ""]);
@@ -289,7 +300,7 @@ export default function AuthPage() {
     }
   }, [step]);
 
-  // â”€â”€ Step 1: Send code â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Step 1: Send code ————————————————————————————————————————————————————
   const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!phone.trim()) { setError("O número de telefone é obrigatório"); return; }
@@ -322,7 +333,7 @@ export default function AuthPage() {
     }
   };
 
-  // â”€â”€ Step 2: Verify OTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Step 2: Verify OTP ———————————————————————————————————————————————————
   const handleOtpChange = (index: number, val: string) => {
     const cleanVal = val.replace(/[^0-9]/g, "").slice(0, 1);
     const newOtp = [...otp];
@@ -387,7 +398,7 @@ export default function AuthPage() {
     }
   };
 
-  // â”€â”€ Step 3: 2FA password â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Step 3: 2FA password —————————————————————————————————————————————————
   const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password) { setError("A senha é obrigatória."); return; }
@@ -429,7 +440,7 @@ export default function AuthPage() {
     }
   };
 
-  // â”€â”€ Shared: complete auth flow â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Shared: complete auth flow ———————————————————————————————————————————
   const completeAuthentication = async (client: any) => {
     const sessionString = client.session.save() as string;
 
@@ -460,7 +471,7 @@ export default function AuthPage() {
     }
   };
 
-  // â”€â”€ Loading screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Loading screen ———————————————————————————————————————————————————————
   if (checkingConfig) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background select-none">
@@ -477,7 +488,7 @@ export default function AuthPage() {
     );
   }
 
-  // â”€â”€ Main render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Main render ——————————————————————————————————————————————————————————
   return (
     <div className="flex items-center justify-center min-h-screen bg-background relative select-none overflow-hidden">
       {/* Decorative background blobs */}
@@ -521,7 +532,7 @@ export default function AuthPage() {
             </div>
           )}
 
-          {/* â”€â”€ STEP 1: Phone â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          {/* —— STEP 1: Phone ——————————————————————————————————————————— */}
           {step === "phone" && (
             <form onSubmit={handleSendCode} className="space-y-5 animate-slide-up-fade" noValidate>
               <div className="text-center space-y-1.5 mb-6">
@@ -561,7 +572,7 @@ export default function AuthPage() {
             </form>
           )}
 
-          {/* â”€â”€ STEP 2: OTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          {/* —— STEP 2: OTP ————————————————————————————————————————————— */}
           {step === "otp" && (
             <form onSubmit={handleVerifyOTP} className="space-y-6 animate-slide-up-fade" noValidate>
               <div className="text-center space-y-1.5">
@@ -627,7 +638,7 @@ export default function AuthPage() {
             </form>
           )}
 
-          {/* â”€â”€ STEP 3: 2FA Password â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          {/* —— STEP 3: 2FA Password ———————————————————————————————————— */}
           {step === "password" && (
             <form onSubmit={handleVerifyPassword} className="space-y-5 animate-slide-up-fade" noValidate>
               <div className="text-center space-y-1.5">
@@ -682,7 +693,7 @@ export default function AuthPage() {
             </form>
           )}
 
-          {/* â”€â”€ STEP 4: Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          {/* —— STEP 4: Bootstrap ——————————————————————————————————————— */}
           {step === "bootstrap" && (
             <div className="space-y-6 py-2 text-center animate-slide-up-fade">
               <div className="flex flex-col items-center gap-1.5 mb-2">
@@ -745,7 +756,8 @@ export default function AuthPage() {
 
         {/* Footer note */}
         <p className="text-center text-[11px] text-[#9aa0a6] dark:text-[#5f6368] mt-4">
-          Protegido pelo Telegram MTProto Â· v0.1.1
+          Protegido pelo Telegram MTProto
+          {appVersion ? ` · v${appVersion}` : ""}
         </p>
       </div>
     </div>

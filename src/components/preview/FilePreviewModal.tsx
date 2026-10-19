@@ -1,11 +1,11 @@
-﻿﻿/**
+﻿/**
  * FilePreviewModal.tsx
  * Full-screen file preview + editor modal.
  * Fully theme-aware: adapts topbar, status bar, surfaces, and text to dark/light.
  *
- * Read mode  â†’ SyntaxHighlighter (highlight.js, lazy, theme-aware)
- * Edit mode  â†’ CodeEditor (CodeMirror 6, lazy, theme-aware via Compartment)
- * Binary     â†’ native <img>, <video>, <audio>, <iframe>
+ * Read mode  → SyntaxHighlighter (highlight.js, lazy, theme-aware)
+ * Edit mode  → CodeEditor (CodeMirror 6, lazy, theme-aware via Compartment)
+ * Binary     → native <img>, <video>, <audio>, <iframe>
  */
 import { useState, useEffect, useCallback, useMemo, useRef, Component, ReactNode } from "react";
 import {
@@ -67,7 +67,7 @@ import { CsvTableViewer } from "./CsvTableViewer";
 import { PdfViewer } from "./PdfViewer";
 import { toast } from "sonner";
 
-// â”€â”€â”€ PDF-specific Error Boundary (isolates PDF crashes from the rest of the modal)
+// ——— PDF-specific Error Boundary (isolates PDF crashes from the rest of the modal)
 class PdfErrorBoundary extends Component<{ children: ReactNode; onRetry?: () => void }, { hasError: boolean }> {
   state = { hasError: false };
   static getDerivedStateFromError() { return { hasError: true }; }
@@ -96,8 +96,8 @@ class PdfErrorBoundary extends Component<{ children: ReactNode; onRetry?: () => 
 import DOMPurify from "dompurify";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 
-// â”€â”€â”€ O2 Code Editor — runnable language map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Maps our hljsLang alias â†’ O2's route value.
+// ——— O2 Code Editor — runnable language map ————————————————————————————————
+// Maps our hljsLang alias → O2's route value.
 // Only languages O2 can actually execute/render are listed here.
 const O2_LANG_MAP: Record<string, string> = {
   python:     "python",
@@ -114,7 +114,7 @@ const O2_LANG_MAP: Record<string, string> = {
   html:       "html",
 };
 
-// â”€â”€â”€ File-type icon â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— File-type icon ————————————————————————————————————————————————————————
 
 function FileTypeIcon({ mime, name }: { mime: string; name: string }) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
@@ -168,7 +168,7 @@ function sanitizeHtml(html: string): string {
   });
 }
 
-// â”€â”€â”€ Props â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Props ————————————————————————————————————————————————————————————————
 
 interface Props {
   file: TeleFile | null;
@@ -176,12 +176,12 @@ interface Props {
   onClose: () => void;
 }
 
-// â”€â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ——— Component ————————————————————————————————————————————————————————————
 
 export function FilePreviewModal({ file, initialEditMode = false, onClose }: Props) {
   const isDark = useDarkMode();
 
-  // â”€â”€ Download / load state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Download / load state ————————————————————————————————————————————————
   const [loading, setLoading]         = useState(false);
   const [progress, setProgress]       = useState(0);
   const [error, setError]             = useState<string | null>(null);
@@ -189,7 +189,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
   const [textContent, setTextContent] = useState<string | null>(null);
   const [markdownHtml, setMarkdownHtml] = useState<string | null>(null);
 
-  // â”€â”€ Multi-format View Mode states â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Multi-format View Mode states ———————————————————————————————————————
   const [mdViewMode, setMdViewMode]     = useState<"preview" | "source">("preview");
   const [csvViewMode, setCsvViewMode]   = useState<"table" | "source">("table");
   const [svgViewMode, setSvgViewMode]   = useState<"image" | "code">("image");
@@ -197,14 +197,14 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
   const [codeFontSize, setCodeFontSize] = useState(13);
   const [copiedCode, setCopiedCode]     = useState(false);
 
-  // â”€â”€ Edit state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Edit state ——————————————————————————————————————————————————————————
   const [isEditMode, setIsEditMode]   = useState(false);
   const [editContent, setEditContent] = useState("");
   const [isSaving, setIsSaving]       = useState(false);
   const [saveStatus, setSaveStatus]   = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [cursorPos, setCursorPos]     = useState({ line: 1, col: 1 });
 
-  // â”€â”€ Image preview states â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Image preview states ——————————————————————————————————————————————————
   const [zoom, setZoom]               = useState(1);
   const [pan, setPan]                 = useState({ x: 0, y: 0 });
   const [rotation, setRotation]       = useState(0);
@@ -216,7 +216,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
   const pdfBufferRef                  = useRef<Uint8Array | null>(null);
   const [pdfData, setPdfData]         = useState<Uint8Array | null>(null);
 
-  // â”€â”€ Video preview states & refs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Video preview states & refs ——————————————————————————————————————————
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -229,7 +229,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
   const [showVideoControls, setShowVideoControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
 
-  // â”€â”€ Audio preview states & refs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Audio preview states & refs ——————————————————————————————————————————
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
@@ -522,7 +522,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     setZoom(z => Math.min(Math.max(z * factor, 0.25), 4));
   }, []);
 
-  // â”€â”€ Theme-derived surface colors (Google Drive Material 3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Theme-derived surface colors (Google Drive Material 3) ———————————————
   const colors = useMemo(() => isDark ? {
     bg:         "#131314",
     topbar:     "#1e1f20",
@@ -567,7 +567,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     dotGrid:    "#e0e2e7",
   }, [isDark]);
 
-  // â”€â”€ Update lastOpenedAt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Update lastOpenedAt ——————————————————————————————————————————————————
   useEffect(() => {
     if (file) {
       const store = useFileStore.getState();
@@ -575,7 +575,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     }
   }, [file]);
 
-  // â”€â”€ Load file on change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Load file on change ——————————————————————————————————————————————————
   useEffect(() => {
     if (!file) {
       if (contentUrl) URL.revokeObjectURL(contentUrl);
@@ -735,7 +735,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     };
   }, [contentUrl]);
 
-  // â”€â”€ Handlers (memoized) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Handlers (memoized) ——————————————————————————————————————————————————
   const handleDownload = useCallback(() => {
     if (file) {
       downloadFileFromTelegram(file.channelId, file.messageId, file.name).catch((err) => {
@@ -886,7 +886,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     }
   }, [file, editContent, isSaving]);
 
-  // â”€â”€ O2 Code Editor integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— O2 Code Editor integration ——————————————————————————————————————————
   const handleOpenInO2 = useCallback(async () => {
     const code = isEditMode ? editContent : (textContent ?? "");
     const lInfo = detectLang(file?.name ?? "");
@@ -938,7 +938,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
     }
   }, [isEditMode, editContent, textContent]);
 
-  // â”€â”€ Derived state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Derived state —————————————————————————————————————————————————————————
   const langInfo        = detectLang(file?.name ?? "");
   const ext             = file?.name.split(".").pop()?.toLowerCase() ?? "";
   const isSvg           = ext === "svg" || (file?.mime?.toLowerCase() === "image/svg+xml");
@@ -983,13 +983,13 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
 
   if (!file) return null;
 
-  // â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Render ————————————————————————————————————————————————————————————————
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col animate-in fade-in duration-150"
       style={{ background: colors.bg, color: colors.text }}
     >
-      {/* â”€â”€ Topbar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* —— Topbar ——————————————————————————————————————————————————————— */}
       <div
         className="flex items-center justify-between pl-4 pr-3 shrink-0"
         style={{
@@ -1073,7 +1073,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
             </>
           ) : (
             <>
-              {/* â”€â”€ View Switchers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+              {/* —— View Switchers ——————————————————————————————————— */}
               {isMarkdownFile && textContent !== null && (
                 <div
                   className="flex items-center p-0.5 rounded-lg border text-xs mr-1"
@@ -1164,7 +1164,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
                 </div>
               )}
 
-              {/* â”€â”€ Format & Code View Controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+              {/* —— Format & Code View Controls ——————————————————————— */}
               {isJsonFile && textContent !== null && (
                 <button
                   onClick={handleFormatJson}
@@ -1304,7 +1304,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
         </div>
       </div>
 
-      {/* â”€â”€ Main content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* —— Main content ———————————————————————————————————————————————————— */}
       <div className="flex-1 overflow-hidden relative" style={{ background: colors.bg }}>
 
         {/* Loading */}
@@ -2037,7 +2037,7 @@ export function FilePreviewModal({ file, initialEditMode = false, onClose }: Pro
         )}
       </div>
 
-      {/* â”€â”€ Status bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      {/* —— Status bar ————————————————————————————————————————————————————— */}
       {(isCode || isMarkdownFile || isTableData || isEditMode) && !loading && !error && textContent !== null && (
         <div
           className="flex items-center justify-between px-4 shrink-0 select-none"

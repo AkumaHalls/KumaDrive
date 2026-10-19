@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Device backup runner — the orchestrator that does the actual work.
  *
  * Pipeline (driven by `runBackup({triggeredBy})`):
@@ -78,6 +78,15 @@ const BACKUP_BATCH_SIZE = 3;
 const BACKUP_BREATHER_MS = 2_000;
 
 /**
+ * A cada quantos arquivos reavaliamos o gate de bootstrap.
+ *
+ * Precisa ser grande o bastante para não reintroduzir o stall de 8s por
+ * arquivo, e pequeno o bastante para que um gate que abra no meio do run
+ * seja aproveitado em vez de deixar o resto dos arquivos órfãos.
+ */
+const BOOTSTRAP_GATE_RETRIES = 50;
+
+/**
  * Hard cap on the channel-side folderPath string. Telegram documents
  * cap the caption at 1024 chars; the `kumadrive_file:${JSON.stringify(
  * {folder})}:` wrapper adds ~30 chars on top of the path, so we cap
@@ -123,7 +132,7 @@ async function waitForBootstrap(timeoutMs: number = 8000): Promise<boolean> {
 }
 
 /**
- * Lightweight extension â†’ MIME lookup. Imported from `./manifest` (the
+ * Lightweight extension → MIME lookup. Imported from `./manifest` (the
  * canonical home — same map backs the cold-start manifest-merge path in
  * bootstrap, so live uploads and reconciled entries always agree).
  */
@@ -164,6 +173,15 @@ export interface BackupRunResult {
   deviceRoot: string;
   /** Total files considered (walked from disk). */
   totalFound: number;
+  /**
+   * True quando a caminhada foi INTERROMPIDA pelo cancelamento.
+   *
+   * Quando true, `totalFound` é um limite INFERIOR (a lista `walked` foi
+   * truncada), então `uploaded + skipped === totalFound` não prova nada.
+   * Os wrappers precisam disto para não reportar "Backup concluído" num
+   * run que o usuário acabou de cancelar durante a caminhada.
+   */
+  walkTruncated: boolean;
   /** Files actually uploaded this run. */
   filesUploaded: number;
   /** Files skipped because unchanged since last backup. */
@@ -260,6 +278,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
     triggeredBy: opts.triggeredBy,
     deviceRoot: buildDeviceFolder(),
     totalFound: 0,
+    walkTruncated: false,
     filesUploaded: 0,
     filesSkipped: 0,
     filesFailed: 0,
@@ -275,7 +294,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   if (!folders.paths || folders.paths.length === 0) {
     return {
       ...baseResult,
-      error: "Pick at least one folder in Settings â†’ Plan & Devices first.",
+      error: "Selecione pelo menos uma pasta em Configurações → Backup do Dispositivo antes de fazer o backup.",
       status: "failed",
       durationMs: Date.now() - startedAt,
       finishedAt: Date.now(),
@@ -298,7 +317,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   if (!channelId) {
     return {
       ...baseResult,
-      error: "Storage channel is not ready. Please complete first login.",
+      error: "O canal de armazenamento não está pronto. Faça login novamente para concluir a configuração.",
       status: "failed",
       durationMs: Date.now() - startedAt,
       finishedAt: Date.now(),
@@ -329,32 +348,50 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   }
 
   // Walk the source folders.
-  let walked: Awaited<ReturnType<typeof walkSourceFolders>>;
+  let walk: Awaited<ReturnType<typeof walkSourceFolders>>;
   try {
-    walked = await walkSourceFolders(folders, { signal: opts.signal });
+    walk = await walkSourceFolders(folders, { signal: opts.signal });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
       ...baseResult,
-      error: `Walker failed: ${msg}`,
+      error: `Falha ao ler as pastas de origem: ${msg}`,
       status: "failed",
       durationMs: Date.now() - startedAt,
       finishedAt: Date.now(),
     };
   }
+  const walked = walk.files;
+  // Propaga o "a caminhada foi truncada pelo cancel?" até o resultado. Os
+  // wrappers usam isto junto com `totalFound` para decidir se um cancel
+  // tardio representa um run completo ou não — sem isto, cancelar durante
+  // a caminhada terminava como "Backup concluído" (ver WalkResult).
+  const walkTruncated = walk.truncatedByAbort;
 
-  // Detect missing source folders: any configured path that produced 0
-  // files AND is not in the walked list (i.e. the Rust command rejected
-  // it before returning anything).
-  const walkedAbs = new Set(walked.map((w) => w.absPath));
-  const missingFolders: string[] = [];
-  for (const p of folders.paths) {
-    // We can't tell "folder missing" from "folder empty" perfectly — but
-    // an empty existing folder is fine to skip silently. For now, we
-    // surface a warning only when we couldn't even read the root (logged
-    // in walkOneFolder). Future: return that signal up the stack.
-    void p;
-    void walkedAbs;
+  // Pastas de origem que não puderam ser lidas. Antes isto era um loop
+  // vazio (`void p; void walkedAbs;`) e `missingFolders` era SEMPRE `[]`:
+  // uma pasta ilegível produzia `walked = []` e o run terminava com
+  // `status: "success"` sem ter lido um único arquivo. O usuário via
+  // "backup concluído" e não tinha como saber que nada foi espelhado.
+  const missingFolders: string[] = [...walk.unreadableRoots];
+
+  // Se TODAS as pastas configuradas falharam, isto é um erro de
+  // configuração, não um no-op — não faz sentido reportar sucesso.
+  if (
+    missingFolders.length > 0 &&
+    missingFolders.length === folders.paths.length &&
+    folders.paths.length > 0
+  ) {
+    return {
+      ...baseResult,
+      error:
+        "Nenhuma das pastas de origem pôde ser lida. Verifique se os " +
+        "caminhos ainda existem e se você tem permissão de acesso:\n" +
+        missingFolders.join("\n"),
+      status: "failed",
+      durationMs: Date.now() - startedAt,
+      finishedAt: Date.now(),
+    };
   }
 
   // Diff against the manifest.
@@ -366,7 +403,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   if (isManifestCorrupt()) {
     return {
       ...baseResult,
-      error: "Backup manifest is corrupt — refusing to upload until reviewed.",
+      error: "O manifesto do backup está corrompido — o envio foi interrompido para não sobrescrever dados.",
       status: "failed",
       durationMs: Date.now() - startedAt,
       finishedAt: Date.now(),
@@ -385,6 +422,23 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   let filesUploaded = 0;
   let filesFailed = 0;
   let firstError: string | null = null;
+  // Quantas vezes a gravação do manifesto falhou neste run. O manifesto é
+  // o que impede o re-upload na próxima execução; se ele não persistiu,
+  // o backup vai repetir trabalho na próxima vez e o usuário precisa
+  // saber disso em vez de ver "sucesso" toda noite.
+  let manifestSaveFailures = 0;
+
+  // Gate de bootstrap. Reavaliado no primeiro arquivo e a cada
+  // `BOOTSTRAP_GATE_RETRIES` arquivos, e NÃO dentro do `for` original.
+  //
+  // Duas falhas que as versões anteriores tiveram:
+  //   1) esperar dentro do `for`: se o gate nunca destravasse, cada um dos
+  //      N arquivos pagava 8s → 200 arquivos = ~27 min parados.
+  //   2) resolver UMA vez antes do loop: se desse `false`, o `else` rodava
+  //      para TODOS os arquivos — os 200 subiam para o Telegram, o run
+  //      devolvia "success", e NENHUM entrava no índice. Todos órfãos
+  //      até o orphan-scan do próximo cold start.
+  let bootstrapGateReady = false;
 
   // Upload loop. Sequential — the existing uploadFileToTelegram already
   // manages Telegram-side FLOOD_WAIT backoff, and parallel uploads from
@@ -402,8 +456,8 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
     //   sourcePath: /Users/me/Documents/Work/report.pdf
     //   relPath:    Work/report.pdf  (from the walker, already relative
     //                                to the user's chosen source folder)
-    //   â†’ channel folder: /KumaDrive Backups/MacBook Pro/Documents/Work
-    //   â†’ channel name:   report.pdf
+    //   → channel folder: /KumaDrive Backups/MacBook Pro/Documents/Work
+    //   → channel name:   report.pdf
     //
     // The user picks "/Users/me/Documents" as their backup source, so the
     // channel-side root includes the "Documents" segment — this way the
@@ -433,51 +487,59 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
     //   - The final folderPath is length-capped at 900 chars; Telegram's
     //     documented caption ceiling is 1024 and we want headroom for
     //     the `kumadrive_file:{...}` JSON wrapper.
-    const sourceRoot = pickSourceRoot(file.absPath, folders.paths);
-    if (!sourceRoot) {
-      throw new Error(
-        `walker produced ${file.absPath} which does not match any configured ` +
-        `source folder (${folders.paths.join(", ")}). This indicates a walker ` +
-        `or exclude-filter bug — refusing to upload rather than flatten the ` +
-        `file under the device root.`,
-      );
-    }
-    // pickSourceRoot returns the normalized form (forward-slashes, no
-    // trailing slash) — same form buildRootDisplayNames stored the map
-    // key under, so the lookup keys directly without re-normalizing.
-    const relUnderSource = stripPrefix(file.absPath, sourceRoot);
-    const sourceBasename = rootDisplayBasename.get(sourceRoot) ?? "";
-    // Compute channel-side folder. relUnderSource starts with "/" so we
-    // strip it; then take everything except the trailing filename segment.
-    const relClean = relUnderSource.replace(/^\/+/, "");
-    const relSegments = relClean.split("/").filter(Boolean);
-    const fileName = relSegments.pop() ?? file.absPath.split(/[\\/]/).pop() ?? file.absPath;
-    const relFolderSegments = relSegments;
-    const channelFolderSegments = [
-      sourceBasename,
-      ...relFolderSegments,
-    ].filter(Boolean);
-    const folderPath =
-      channelFolderSegments.length > 0
-        ? `${baseResult.deviceRoot}/${channelFolderSegments.join("/")}`
-        : baseResult.deviceRoot;
-
-    // Length cap. Telegram documents cap the caption at 1024 chars; the
-    // `kumadrive_file:${JSON.stringify({folder})}:` wrapper adds ~30
-    // chars on top of the path, so we cap the path at 900 to leave
-    // headroom. A path this long means a deeply-nested source — the
-    // user almost certainly has a folder like "node_modules" they meant
-    // to exclude. We fail-loud per file (don't abort the whole run, the
-    // other files may be fine).
-    if (folderPath.length > FOLDER_PATH_MAX_LENGTH) {
-      throw new Error(
-        `folderPath length ${folderPath.length} exceeds ${FOLDER_PATH_MAX_LENGTH}-char ` +
-        `cap (source path too deeply nested: ${file.absPath}). Add an exclude ` +
-        `pattern or shorten the source tree depth.`,
-      );
-    }
-
+    // O `try` começa AQUI, e não só no `uploadFileToTelegram`: os dois
+    // throw de hardening abaixo ficavam FORA dele, então escapavam de
+    // `runBackupInner` faziam `runBackup` rejeitar, e o `BackupRunResult`
+    // nunca era construído — sem `filesUploaded`, sem `missingFolders`,
+    // sem `status`. Um único arquivo com path profundo (o caso node_
+    // modules que o próprio comentário cita) matava um backup que já
+    // tinha espelhado centenas de arquivos, e o usuário recebia só
+    // "falhou". Os comentários diziam "fail-loud per file"; o código
+    // abortava o run inteiro.
     try {
+      const sourceRoot = pickSourceRoot(file.absPath, folders.paths);
+      if (!sourceRoot) {
+        throw new Error(
+          `walker produced ${file.absPath} which does not match any configured ` +
+          `source folder (${folders.paths.join(", ")}). This indicates a walker ` +
+          `or exclude-filter bug — refusing to upload rather than flatten the ` +
+          `file under the device root.`,
+        );
+      }
+      // pickSourceRoot returns the normalized form (forward-slashes, no
+      // trailing slash) — same form buildRootDisplayNames stored the map
+      // key under, so the lookup keys directly without re-normalizing.
+      const relUnderSource = stripPrefix(file.absPath, sourceRoot);
+      const sourceBasename = rootDisplayBasename.get(sourceRoot) ?? "";
+      // Compute channel-side folder. relUnderSource starts with "/" so we
+      // strip it; then take everything except the trailing filename segment.
+      const relClean = relUnderSource.replace(/^\/+/, "");
+      const relSegments = relClean.split("/").filter(Boolean);
+      const fileName = relSegments.pop() ?? file.absPath.split(/[\\/]/).pop() ?? file.absPath;
+      const relFolderSegments = relSegments;
+      const channelFolderSegments = [
+        sourceBasename,
+        ...relFolderSegments,
+      ].filter(Boolean);
+      const folderPath =
+        channelFolderSegments.length > 0
+          ? `${baseResult.deviceRoot}/${channelFolderSegments.join("/")}`
+          : baseResult.deviceRoot;
+
+      // Length cap. Telegram documents cap the caption at 1024 chars; the
+      // `kumadrive_file:${JSON.stringify({folder})}:` wrapper adds ~30
+      // chars on top of the path, so we cap the path at 900 to leave
+      // headroom. A path this long means a deeply-nested source — the
+      // user almost certainly has a folder like "node_modules" they meant
+      // to exclude.
+      if (folderPath.length > FOLDER_PATH_MAX_LENGTH) {
+        throw new Error(
+          `folderPath length ${folderPath.length} exceeds ${FOLDER_PATH_MAX_LENGTH}-char ` +
+          `cap (source path too deeply nested: ${file.absPath}). Add an exclude ` +
+          `pattern or shorten the source tree depth.`,
+        );
+      }
+
       const message = await uploadFileToTelegram(
         channelId,
         fileName,
@@ -511,7 +573,17 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
         messageId,
         folderPath,
       });
-      await saveManifest(manifest);
+      // O manifesto é a memória do backup: sem ele o próximo run não sabe
+      // que este arquivo já foi espelhado e reenvia. Contabilizamos a
+      // falha em vez de deixar `saveManifest` engolir, para que o
+      // resultado final saia como "partial" com aviso — e não como um
+      // "sucesso" que se repete indefinidamente.
+      try {
+        await saveManifest(manifest);
+      } catch (manifestErr) {
+        manifestSaveFailures++;
+        console.warn("[backup.runner] manifest save failed:", manifestErr);
+      }
 
       // Tier 1 — T1.1: write the new TeleFile to the in-memory file store
       // AND route an enqueueSave through the shared IndexQueue. Mirrors the
@@ -538,8 +610,25 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
         trashed: false,
       };
 
-      const bootstrapReady = await waitForBootstrap(8000);
-      if (bootstrapReady) {
+      // Gate resolvido UMA vez, antes do loop.
+      //
+      // Antes esta chamada ficava dentro do `for`: se o bootstrap nunca
+      // completasse o gate, cada um dos N arquivos pagava até 8s de
+      // espera. Com 200 arquivos eram ~27 minutos parados, e o overlay
+      // mostrava "Fazendo backup — N / M" sem indicar que estava
+      // aguardando. Uma vez checado o gate, ele está aberto ou não —
+      // reconsultar por arquivo não traz informação nova.
+      //
+      // Reavaliamos a cada `BOOTSTRAP_GATE_RETRIES` arquivos em vez de
+      // fixar o resultado: fixar `false` antes do loop fazia TODOS os
+      // arquivos pularem o índice, e o run devolvia "success" com nada
+      // gravado. Se continuarmos sem gate, `bootstrapGateReady` fica
+      // `false` e o índice é deixado para o orphan-scan — o
+      // comportamento seguro.
+      if (!bootstrapGateReady && i % BOOTSTRAP_GATE_RETRIES === 0) {
+        bootstrapGateReady = await waitForBootstrap(8000);
+      }
+      if (bootstrapGateReady) {
         const existingFiles = useFileStore.getState().files;
         // Reconstruct any missing virtual folders BEFORE adding the new
         // file, so the optimistic array mirrors what `healAndSave` would
@@ -626,8 +715,17 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       const msg = err instanceof Error ? err.message : String(err);
       firstError ??= msg;
       console.warn(`[backup.runner] failed to upload ${file.absPath}:`, msg);
-      // Persist progress before bailing on a hard error.
-      await saveManifest(manifest);
+      // Persist progress before bailing on a hard error. Não pode
+      // propagar: o `catch` acima já contabilizou a falha do arquivo e
+      // o loop precisa seguir para os demais. Uma falha ao gravar o
+      // manifesto é contabilizada à parte e transforma o resultado em
+      // "partial".
+      try {
+        await saveManifest(manifest);
+      } catch (manifestErr) {
+        manifestSaveFailures++;
+        console.warn("[backup.runner] manifest save (error path) failed:", manifestErr);
+      }
       opts.onProgress?.({
         uploaded: filesUploaded + filesFailed,
         total: totalToUpload,
@@ -645,7 +743,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
         // actually happened (and the user knows the magnitude of the loss).
         filesFailed += diff.toUpload.length - i - 1;
         firstError ??=
-          "Telegram session expired. Reconnect your account in Settings â†’ Telegram Account, then run the backup again.";
+          "Sessão do Telegram expirada. Reconecte sua conta em Configurações → Conta do Telegram e execute o backup novamente.";
         console.warn(
           `[backup.runner] hard Telegram error; aborting run. ${diff.toUpload.length - i - 1} files remaining skipped.`,
         );
@@ -656,18 +754,33 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   }
 
   // Aggregate status. Order matters:
-  //   1. Any filesFailed â†’ "partial" (if some uploaded) or "failed" (if none did).
+  //   1. Any filesFailed → "partial" (if some uploaded) or "failed" (if none did).
   //      The previous ordering checked `unchanged > 0` BEFORE checking `filesFailed`,
   //      which silently hid a 0-uploaded + 18-unchanged + 218-failed run as
   //      "success" — the user saw "Backup complete — nothing changed" and never
   //      realised their Telegram session was revoked and 218 files failed.
-  //   2. No-op (everything unchanged, nothing failed) â†’ "success".
-  //   3. All-uploaded â†’ "success".
+  //   2. No-op (everything unchanged, nothing failed) → "success".
+  //   3. All-uploaded → "success".
+  //   4. `manifestSaveFailures > 0` degrada para "partial" mesmo sem
+  //      falha de upload: os arquivos subiram, mas o manifesto não foi
+  //      gravado, então o próximo run vai reenviá-los. Sem isso o
+  //      usuário veria "sucesso" toda noite enquanto o canal enche de
+  //      duplicatas.
   let status: BackupRunResult["status"];
   if (filesFailed > 0 && filesUploaded > 0) status = "partial";
   else if (filesFailed > 0) status = "failed";
+  else if (manifestSaveFailures > 0) status = "partial";
   else if (filesUploaded > 0) status = "success";
   else status = "success"; // no-op run: nothing to upload, nothing failed
+
+  if (manifestSaveFailures > 0) {
+    const msg =
+      `O backup enviou os arquivos, mas não conseguiu gravar o registro do que foi ` +
+      `espelhado (${manifestSaveFailures}x). Na próxima execução alguns arquivos podem ` +
+      `ser enviados novamente.`;
+    firstError ??= msg;
+    console.warn(`[backup.runner] ${msg}`);
+  }
 
   // Audit job id — backend removed, set null.
   const auditJobId: string | null = null;
@@ -690,12 +803,21 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
 
   // Update the fileStore timestamp so the UI re-renders the "Last backup"
   // label. The store setter is a no-op when bootstrap hasn't completed.
-  useFileStore.getState().setLastBackupAt(Date.now());
+  //
+  // Só quando o run NÃO falhou por completo. Antes era incondicional, e
+  // a tela de Backup mostrava "Último backup: há instantes" logo depois
+  // de um run que enviou ZERO arquivos e falhou — impressionando sucesso
+  // exatamente quando houve falha total. `partial` conta como backup
+  // (alguma coisa subiu), então só o "failed" puro é excluído.
+  if (status !== "failed") {
+    useFileStore.getState().setLastBackupAt(Date.now());
+  }
 
   return {
     triggeredBy: opts.triggeredBy,
     deviceRoot: baseResult.deviceRoot,
     totalFound: walked.length,
+    walkTruncated,
     filesUploaded,
     filesSkipped: diff.unchanged.length,
     filesFailed,
@@ -732,8 +854,8 @@ function pickSourceRoot(absPath: string, roots: string[]): string | null {
  * When two configured roots share a basename, the SECOND occurrence (and
  * beyond) is prefixed with the parent directory's basename, e.g.:
  *
- *   /Users/me/Documents       â†’ "Documents"
- *   /Volumes/ext/Documents    â†’ "ext-Documents"
+ *   /Users/me/Documents       → "Documents"
+ *   /Volumes/ext/Documents    → "ext-Documents"
  *
  * The map is keyed on the normalized absolute path, so re-running with
  * the same config produces the same display name (idempotent — no drift

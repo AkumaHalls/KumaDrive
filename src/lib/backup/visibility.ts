@@ -1,8 +1,8 @@
-﻿﻿/**
+﻿/**
  * Backup visibility — single source of truth for "is this a backup file?".
  *
  * The device-backup runner writes uploaded files under
- * `/KumaDrive Backups/<device>/<source>/<inner>/<file>` (see runner.ts â†’
+ * `/KumaDrive Backups/<device>/<source>/<inner>/<file>` (see runner.ts →
  * buildDeviceFolder + the per-file folderPath computation). This file is
  * the only place that knows the magic namespace prefix; every UI call
  * site that needs to ask "should this entry be visible in My Drive?" or
@@ -21,7 +21,7 @@ import type { TeleFile } from "../types";
  * a folder literally named `/KumaDrive Backups` (no nested path) is not
  * a backup item.
  *
- * Must match the string built in `runner.ts â†’ buildDeviceFolder()`.
+ * Must match the string built in `runner.ts → buildDeviceFolder()`.
  */
 export const BACKUP_ROOT = "/KumaDrive Backups";
 

@@ -74,7 +74,7 @@ export function BackupProgressOverlay() {
   const title = isActive
     ? state.status === "walking"
       ? "Verificando pastas…"
-      : `Fazendo backup — ${state.uploaded} / ${state.total}`
+      : `${state.triggeredBy === "auto" ? "Backup agendado" : "Fazendo backup"} — ${state.uploaded} / ${state.total}`
     : state.status === "done"
       ? state.lastResult && state.lastResult.filesUploaded > 0
         ? `Backup concluído — ${state.lastResult.filesUploaded} arquivo${state.lastResult.filesUploaded === 1 ? "" : "s"} enviado${state.lastResult.filesUploaded === 1 ? "" : "s"}`
@@ -110,7 +110,16 @@ export function BackupProgressOverlay() {
       if (state.lastResult.filesUploaded > 0) parts.push(`${state.lastResult.filesUploaded} enviados`);
       if (state.lastResult.filesSkipped > 0) parts.push(`${state.lastResult.filesSkipped} sem alterações`);
       if (state.lastResult.filesFailed > 0) parts.push(`${state.lastResult.filesFailed} falharam`);
-      return parts.join(" · ");
+      const summary = parts.join(" · ");
+      // `partial` chega aqui como status "done" (o store mapeia tudo que
+      // não é "failed" para "done"), então o `error` — que hoje carrega
+      // o aviso de manifesto não gravado — só aparecia no toast. Mostrar
+      // aqui também evita que o aviso exista só durante o auto-dismiss de
+      // 6 segundos.
+      if (state.lastResult.status === "partial" && state.error) {
+        return state.error;
+      }
+      return summary;
     }
     if (state.status === "failed" && state.error) return state.error;
     if (state.status === "cancelled") return "Você pode retomar quando quiser.";
@@ -137,11 +146,7 @@ export function BackupProgressOverlay() {
           : "text-[#0B57D0] dark:text-[#A8C7FA]";
 
   return (
-    <div
-      className="fixed bottom-6 right-6 z-50 w-[360px] max-w-[calc(100vw-3rem)] animate-in slide-in-from-bottom-4 fade-in duration-300 select-none"
-      role="status"
-      aria-live="polite"
-    >
+    <div className="fixed bottom-6 right-6 z-50 w-[360px] max-w-[calc(100vw-3rem)] animate-in slide-in-from-bottom-4 fade-in duration-300 select-none">
       <div
         className={cn(
           "rounded-2xl shadow-xl border overflow-hidden",
@@ -166,9 +171,17 @@ export function BackupProgressOverlay() {
             )}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
-              {title}
-            </p>
+            {/*
+              `aria-live` AQUI, não no container raiz. O painel tem botões
+              interativos (Cancelar / dispensar); um leitor de tela não
+              expõe como focável um botão que aparece dentro de uma live
+              region. O anúncio que importa é o TEXTO (título + sublabel),
+              então a região viva cobre só ele.
+            */}
+            <div role="status" aria-live="polite">
+              <p className="text-sm font-semibold text-[#1F1F1F] dark:text-[#E3E3E3] truncate">
+                {title}
+              </p>
             {sublabel && (
               <p
                 className={cn(
@@ -184,16 +197,38 @@ export function BackupProgressOverlay() {
                 {sublabel}
               </p>
             )}
+            </div>
           </div>
-          {/* Close button */}
-          <button
-            type="button"
-            onClick={() => state.clear()}
-            className="h-7 w-7 rounded-full hover:bg-[#F0F4F9] dark:hover:bg-[#333537] flex items-center justify-center text-[#444746] dark:text-[#C4C7C5] hover:text-[#1F1F1F] dark:hover:text-[#E3E3E3] shrink-0 transition-colors cursor-pointer"
-            aria-label="Dispensar"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          {/* Botão Cancelar — durante o run ativo. Antes não existia
+              NENHUM caminho de cancelamento para backup agendado: o
+              overlay era só-leitura e o /settings só cancelava runs
+              manuais, então um backup agendado de horas era impossível
+              de interromper em qualquer tela. O handler é registrado pelo
+              dono do run (hook manual ou scheduler). */}
+          {isActive && (
+            <button
+              type="button"
+              onClick={() => state.cancelRun()}
+              className="h-7 px-2.5 rounded-full hover:bg-[#F0F4F9] dark:hover:bg-[#333537] flex items-center gap-1 text-[11px] font-medium text-[#444746] dark:text-[#C4C7C5] hover:text-[#1F1F1F] dark:hover:text-[#E3E3E3] shrink-0 transition-colors cursor-pointer"
+            >
+              Cancelar
+            </button>
+          )}
+          {/* Botão de dispensar — só aparece quando o run terminou.
+              Durante um backup em andamento o painel é o ÚNICO feedback
+              de progresso: dispensá-lo sumiria com a barra, e o próximo
+              `setProgress` a faria reaparecer (flicker), além de o
+              cancelamento já ter seu próprio botão. */}
+          {!isActive && (
+            <button
+              type="button"
+              onClick={() => state.clear()}
+              className="h-7 w-7 rounded-full hover:bg-[#F0F4F9] dark:hover:bg-[#333537] flex items-center justify-center text-[#444746] dark:text-[#C4C7C5] hover:text-[#1F1F1F] dark:hover:text-[#E3E3E3] shrink-0 transition-colors cursor-pointer"
+              aria-label="Dispensar"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         {/* Progress bar (only while active) */}

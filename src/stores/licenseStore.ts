@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * licenseStore — stub replacement.
  *
  * KumaDrive is now a fully free application. All plan/Pro gating, backend
@@ -9,6 +9,7 @@
  * persisted in localStorage directly by this store.
  */
 import { create } from 'zustand';
+import { toast } from 'sonner';
 
 export type Plan = 'FREE' | 'PRO';
 
@@ -72,10 +73,22 @@ function loadBackupFolders(): BackupFoldersPayload {
   return { paths: [], excludes: [] };
 }
 
-function saveBackupFolders(folders: BackupFoldersPayload): void {
+/**
+ * Grava as pastas de origem. Retorna `false` se a escrita falhou.
+ *
+ * Antes o erro era engolido e o state era atualizado mesmo assim: a
+ * pasta aparecia na lista durante a sessão e sumia no próximo boot.
+ * O sintoma era o backup falhar depois com "selecione pelo menos uma
+ * pasta", sem o usuário ter mexido em nada. O chamador agora avisa.
+ */
+function saveBackupFolders(folders: BackupFoldersPayload): boolean {
   try {
     localStorage.setItem(BACKUP_FOLDERS_KEY, JSON.stringify(folders));
-  } catch { /* ignore */ }
+    return true;
+  } catch (err) {
+    console.warn("[licenseStore] failed to persist backupFolders:", err);
+    return false;
+  }
 }
 
 function loadBackupSchedule(): number | null {
@@ -86,10 +99,15 @@ function loadBackupSchedule(): number | null {
   return null;
 }
 
-function saveBackupSchedule(intervalMinutes: number | null): void {
+/** Grava o intervalo. Retorna `false` se a escrita falhou (ex.: quota). */
+function saveBackupSchedule(intervalMinutes: number | null): boolean {
   try {
     localStorage.setItem(BACKUP_SCHEDULE_KEY, JSON.stringify(intervalMinutes));
-  } catch { /* ignore */ }
+    return true;
+  } catch (err) {
+    console.warn("[licenseStore] failed to persist backup schedule:", err);
+    return false;
+  }
 }
 
 export const useLicenseStore = create<LicenseState>((set, _get) => ({
@@ -117,13 +135,24 @@ export const useLicenseStore = create<LicenseState>((set, _get) => ({
   revokeDeviceById: async () => { /* no-op: backend removed */ },
 
   setProSchedule: async (intervalMinutes) => {
-    saveBackupSchedule(intervalMinutes);
+    const persisted = saveBackupSchedule(intervalMinutes);
     // Update local license projection so the UI stays in sync
     set((prev) => ({
       license: prev.license
         ? { ...prev.license, scheduledBackupIntervalMinutes: intervalMinutes }
         : { id: 'local', plan: 'PRO', purchasedAt: null, expiresAt: null, scheduledBackupIntervalMinutes: intervalMinutes },
     }));
+
+    // Mesmo motivo do `setProBackupFolders`: o badge "Ativo" vem do state
+    // em memória, então sem este aviso o usuário escolhia "A cada 24
+    // horas", viaia o badge ligado — e no próximo boot o agendamento
+    // simplesmente não existia mais, sem nenhum sinal.
+    if (!persisted) {
+      toast.warning("O agendamento de backup não pôde ser salvo", {
+        description:
+          "Vale para esta sessão, mas não foi gravado no dispositivo (armazenamento cheio ou bloqueado). O backup agendado será perdido ao fechar o KumaDrive.",
+      });
+    }
   },
 
   setProBackupFolders: async (folders) => {
@@ -132,8 +161,18 @@ export const useLicenseStore = create<LicenseState>((set, _get) => ({
       paths: folders.paths.filter((p) => typeof p === 'string' && p.length > 0).slice(0, 10),
       excludes: folders.excludes.filter((p) => typeof p === 'string' && p.length > 0).slice(0, 30),
     };
-    saveBackupFolders(next);
+    const persisted = saveBackupFolders(next);
     set({ backupFolders: next });
+
+    // O state reflete a sessão atual, mas sem a escrita no localStorage a
+    // configuração morre no próximo boot — e o backup passa a falhar com
+    // "selecione pelo menos uma pasta" sem o usuário ter mudado nada.
+    if (!persisted) {
+      toast.warning("A configuração de backup não pôde ser salva", {
+        description:
+          "A pasta foi adicionada para esta sessão, mas não pôde ser gravada no dispositivo (armazenamento cheio ou bloqueado). Ela será perdida ao fechar o KumaDrive.",
+      });
+    }
   },
 }));
 

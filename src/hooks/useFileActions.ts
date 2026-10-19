@@ -1,4 +1,4 @@
-﻿﻿import { getSecret, VAULT_KEY_CHANNEL_ID, channelIdKey } from "../lib/secure/vault";
+﻿import { getSecret, VAULT_KEY_CHANNEL_ID, channelIdKey } from "../lib/secure/vault";
 import {
   deleteTelegramMessage,
   folderIdForPath,
@@ -107,6 +107,28 @@ function rollbackToLastSnapshot(): boolean {
   return true;
 }
 
+type ApplyOptimisticOptions = {
+  skipRollbackOnHardError?: boolean;
+  eventType?: string;
+  eventPayload?: Record<string, unknown>;
+  /**
+   * Id do toast de loading criado pelo chamador. Quando presente, os
+   * `toast.error` internos usam esse id para SUBSTITUIR o loading
+   * pendurante — senão o loading ficaria órfão na tela para sempre.
+   */
+  toastId?: string | number;
+};
+
+/**
+ * Marca um erro como "já notificado com toast" para o catch externo não
+ * emitir um segundo `toast.error` para a MESMA falha (bug da auditoria
+ * round 4: dois vermelhos para um só erro).
+ */
+function markToasted<T>(e: T): T {
+  if (e && typeof e === "object") (e as any).kumadriveToasted = true;
+  return e;
+}
+
 /**
  * Optimistically apply a new files array and persist it to Telegram.
  *
@@ -116,11 +138,14 @@ function rollbackToLastSnapshot(): boolean {
  *   concurrent calls into a single Telegram edit. Transient errors
  *   (FLOOD_WAIT, timeout) stay optimistic and retry indefinitely; hard
  *   errors trigger a rollback to the snapshot.
+ * - Quando `options.toastId` é passado, os `toast.error` internos
+ *   substituem o loading do chamador (mesmo id) e marcam o erro com
+ *   `kumadriveToasted` para o catch externo não duplicar o aviso.
  */
 async function applyOptimistic(
   channelId: string,
   nextFiles: TeleFile[],
-  options: { skipRollbackOnHardError?: boolean; eventType?: string; eventPayload?: Record<string, unknown> } = {}
+  options: ApplyOptimisticOptions = {}
 ): Promise<void> {
   const store = useFileStore.getState();
 
@@ -137,8 +162,13 @@ async function applyOptimistic(
     if (!options.skipRollbackOnHardError) {
       rollbackToLastSnapshot();
     }
-    toast.error("Still loading your drive — please retry in a moment.");
-    throw new Error("Bootstrap not complete");
+    // Substitui o loading pendurante (mesmo id) quando o chamador criou um.
+    toast.error(
+      "Ainda estamos carregando seu drive — tente novamente em instantes.",
+      options.toastId ? { id: options.toastId } : undefined
+    );
+    // Marca o erro: já avisamos com toast, o catch externo não deve repetir.
+    throw markToasted(new Error("Bootstrap not complete"));
   }
 
   pushSnapshotForRollback();
@@ -175,10 +205,14 @@ async function applyOptimistic(
     await invoke("log_vault_state", {
       state: `ACTION_HARD_ERR rolled=${rolled}: ${err?.message ?? err}`,
     }).catch(() => {});
+    // Mesmo id do loading do chamador → o vermelho substitui o loading em
+    // vez de virar um toast órfão ao lado dele.
     toast.error(
-      `Save failed and was rolled back: ${err?.message ?? "Unknown error"}`
+      `Falha ao salvar e a alteração foi desfeita: ${err?.message ?? "Erro desconhecido"}`,
+      options.toastId ? { id: options.toastId } : undefined
     );
-    throw err;
+    // Já emitimos o toast — o catch externo não deve emitir outro.
+    throw markToasted(err);
   } finally {
     useFileStore.getState().setSyncing(false);
   }
@@ -209,6 +243,40 @@ if (typeof window !== "undefined") {
   };
 }
 
+/**
+ * Envolve `applyOptimistic` com o ciclo completo de feedback:
+ * loading → sucesso OU erro (nunca os dois, nunca órfão).
+ *
+ * Por que não basta mover o `toast.success` para depois do `await`: em
+ * erro transitório (FLOOD_WAIT de até ~600s) o `await` fica pendurado
+ * em retry e a confirmação nunca apareceria. Criando UM toast de loading
+ * com id fixo, tanto o sucesso quanto o erro (emitido pelo próprio
+ * `applyOptimistic` com o MESMO id) SUBSTITUEM o loading — e o verde só
+ * aparece de fato quando o índice comita, eliminando o "sucesso falso"
+ * seguido de vermelho.
+ */
+async function applyOptimisticWithFeedback(
+  channelId: string,
+  nextFiles: TeleFile[],
+  options: ApplyOptimisticOptions,
+  messages: { pending: string; success: string; errorFallback: string },
+): Promise<void> {
+  const tid = toast.loading(messages.pending);
+  try {
+    await applyOptimistic(channelId, nextFiles, { ...options, toastId: tid });
+    toast.success(messages.success, { id: tid });
+  } catch (err: any) {
+    // `applyOptimistic` já emitiu o toast dele com o MESMO id (marcação
+    // `kumadriveToasted`) — só avisamos quando o erro veio de antes dela
+    // (getChannelId, arquivo não encontrado, etc.).
+    if (!err?.kumadriveToasted) {
+      toast.error(err?.message || messages.errorFallback, { id: tid });
+      markToasted(err);
+    }
+    throw err;
+  }
+}
+
 export function useFileActions() {
   const isOperating = useFileStore((state) => state.isOperating);
   const currentFolder = useFileStore((state) => state.currentFolder);
@@ -223,8 +291,9 @@ export function useFileActions() {
       cid = await getSecret(VAULT_KEY_CHANNEL_ID);
     }
     if (!cid) {
-      toast.error("Telegram storage channel is not initialized");
-      throw new Error("Channel ID missing");
+      toast.error("O canal de armazenamento do Telegram não está configurado");
+      // Toast já emitido — marca para o catch de cada ação não duplicar.
+      throw markToasted(new Error("Channel ID missing"));
     }
     return cid;
   }, [phoneNumber]);
@@ -245,7 +314,7 @@ export function useFileActions() {
       const newFullPath =
         targetParent === "/" ? `/${trimmed}` : `${targetParent}/${trimmed}`;
       if (findFoldersByPath(files, newFullPath).length > 0) {
-        toast.info(`Folder "${trimmed}" already exists`);
+        toast.info(`A pasta "${trimmed}" já existe`);
         return;
       }
 
@@ -268,11 +337,23 @@ export function useFileActions() {
         trashed: false,
       };
 
-      toast.success(`Folder "${trimmed}" created successfully`);
-      await applyOptimistic(channelId, [...files, newFolder], { eventType: "folder.created", eventPayload: { name: trimmed } });
+      // Feedback (loading → sucesso/erro) fica no wrapper: o verde só
+      // aparece quando o índice comita, e em hard error o próprio
+      // `applyOptimistic` substitui o loading pelo vermelho (sem toast
+      // duplicado e sem "sucesso" falso antes da falha).
+      await applyOptimisticWithFeedback(
+        channelId,
+        [...files, newFolder],
+        { eventType: "folder.created", eventPayload: { name: trimmed } },
+        {
+          pending: "Criando pasta…",
+          success: `Pasta "${trimmed}" criada com sucesso`,
+          errorFallback: "Não foi possível criar a pasta",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to create folder:", err);
-      toast.error(err.message || "Failed to create folder");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível criar a pasta");
     }
   }, [currentFolder, getChannelId]);
 
@@ -282,7 +363,7 @@ export function useFileActions() {
       const channelId = await getChannelId();
       const allFiles = useFileStore.getState().files;
       const fileToRename = allFiles.find((f) => f.id === fileId);
-      if (!fileToRename) throw new Error("File not found");
+      if (!fileToRename) throw new Error("Arquivo não encontrado");
 
       const isFolderRename = fileToRename.mime === "inode/directory" || fileToRename.mime === "application/x-directory";
 
@@ -325,11 +406,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success("Renamed successfully");
-      await applyOptimistic(channelId, updatedFiles, { eventType: "file.renamed", eventPayload: { name: fileToRename.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "file.renamed", eventPayload: { name: fileToRename.name } },
+        {
+          pending: "Renomeando…",
+          success: "Renomeado com sucesso",
+          errorFallback: "Não foi possível renomear",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to rename:", err);
-      toast.error(err.message || "Failed to rename");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível renomear");
     }
   }, [getChannelId]);
 
@@ -344,11 +433,19 @@ export function useFileActions() {
         f.id === file.id ? { ...f, starred: nextStarred } : f
       );
 
-      toast.success(nextStarred ? "Added to Starred" : "Removed from Starred");
-      await applyOptimistic(channelId, updatedFiles, { eventType: nextStarred ? "file.starred" : "file.unstarred", eventPayload: { name: file.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: nextStarred ? "file.starred" : "file.unstarred", eventPayload: { name: file.name } },
+        {
+          pending: "Salvando…",
+          success: nextStarred ? "Adicionado aos favoritos" : "Removido dos favoritos",
+          errorFallback: "Não foi possível atualizar os favoritos",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to toggle star:", err);
-      toast.error(err.message || "Failed to update star");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível atualizar os favoritos");
     }
   }, [getChannelId]);
 
@@ -369,11 +466,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Moved "${file.name}" to Trash`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "file.trashed", eventPayload: { name: file.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "file.trashed", eventPayload: { name: file.name } },
+        {
+          pending: "Movendo para a lixeira…",
+          success: `"${file.name}" movido para a lixeira`,
+          errorFallback: "Não foi possível mover para a lixeira",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to move to trash:", err);
-      toast.error(err.message || "Failed to move to trash");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível mover para a lixeira");
     }
   }, [getChannelId]);
 
@@ -394,11 +499,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Restored "${file.name}"`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "file.restored", eventPayload: { name: file.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "file.restored", eventPayload: { name: file.name } },
+        {
+          pending: "Restaurando…",
+          success: `"${file.name}" restaurado`,
+          errorFallback: "Não foi possível restaurar",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to restore from trash:", err);
-      toast.error(err.message || "Failed to restore");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível restaurar");
     }
   }, [getChannelId]);
 
@@ -419,11 +532,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`"${file.name}" archived`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "file.archived", eventPayload: { name: file.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "file.archived", eventPayload: { name: file.name } },
+        {
+          pending: "Arquivando…",
+          success: `"${file.name}" arquivado`,
+          errorFallback: "Não foi possível arquivar",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to archive:", err);
-      toast.error(err.message || "Failed to archive");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível arquivar");
     }
   }, [getChannelId]);
 
@@ -444,11 +565,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`"${file.name}" moved back to My Drive`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "file.unarchived", eventPayload: { name: file.name } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "file.unarchived", eventPayload: { name: file.name } },
+        {
+          pending: "Desarquivando…",
+          success: `"${file.name}" movido de volta ao Meu Drive`,
+          errorFallback: "Não foi possível desarquivar",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to unarchive:", err);
-      toast.error(err.message || "Failed to unarchive");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível desarquivar");
     }
   }, [getChannelId]);
 
@@ -457,7 +586,7 @@ export function useFileActions() {
       const channelId = await getChannelId();
       const allFiles = useFileStore.getState().files;
       const fileToDelete = allFiles.find((f) => f.id === fileId);
-      if (!fileToDelete) throw new Error("File not found");
+      if (!fileToDelete) throw new Error("Arquivo não encontrado");
 
       const isFolder = fileToDelete.mime === "inode/directory" || fileToDelete.mime === "application/x-directory";
 
@@ -476,8 +605,16 @@ export function useFileActions() {
         active = allFiles.filter((f) => f.id !== fileId);
       }
 
-      toast.success("Deleted permanently");
-      await applyOptimistic(channelId, active, { eventType: "file.deleted", eventPayload: { fileId } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        active,
+        { eventType: "file.deleted", eventPayload: { fileId } },
+        {
+          pending: "Excluindo…",
+          success: "Excluído permanentemente",
+          errorFallback: "Não foi possível excluir",
+        }
+      );
 
       // After the index commits, asynchronously delete offline caches and
       // Telegram messages in the background. If the index save had failed,
@@ -503,7 +640,7 @@ export function useFileActions() {
       })();
     } catch (err: any) {
       console.error("Failed to delete permanently:", err);
-      toast.error(err.message || "Failed to delete");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível excluir");
     }
   }, [getChannelId]);
 
@@ -515,16 +652,20 @@ export function useFileActions() {
       const active = allFiles.filter((f) => !f.trashed);
 
       if (trashed.length === 0) {
-        toast.info("Trash is already empty");
+        toast.info("A lixeira já está vazia");
         return;
       }
 
-      toast.success(
-        trashed.length === 1
-          ? "1 item deleted permanently"
-          : `${trashed.length} items deleted permanently`
+      await applyOptimisticWithFeedback(
+        channelId,
+        active,
+        { eventType: "files.deleted", eventPayload: { count: trashed.length } },
+        {
+          pending: `Esvaziando a lixeira…`,
+          success: `Lixeira esvaziada — ${trashed.length} item(ns) excluído(s) permanentemente`,
+          errorFallback: "Não foi possível esvaziar a lixeira",
+        }
       );
-      await applyOptimistic(channelId, active, { eventType: "files.deleted", eventPayload: { count: trashed.length } });
 
       // After the index commits, asynchronously clear cache & delete telegram messages in background
       void (async () => {
@@ -547,7 +688,7 @@ export function useFileActions() {
       })();
     } catch (err: any) {
       console.error("Failed to empty trash:", err);
-      toast.error(err.message || "Failed to empty trash");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível esvaziar a lixeira");
     }
   }, [getChannelId]);
 
@@ -574,11 +715,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Moved ${fileIds.length} item(s) to Trash`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.trashed", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.trashed", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Movendo ${fileIds.length} itens para a lixeira…`,
+          success: `${fileIds.length} item(ns) movido(s) para a lixeira`,
+          errorFallback: "Não foi possível mover os itens para a lixeira",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to move multiple to trash:", err);
-      toast.error(err.message || "Failed to move items to trash");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível mover os itens para a lixeira");
     }
   }, [getChannelId]);
 
@@ -605,11 +754,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Restored ${fileIds.length} item(s)`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.restored", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.restored", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Restaurando ${fileIds.length} itens…`,
+          success: `${fileIds.length} item(ns) restaurado(s)`,
+          errorFallback: "Não foi possível restaurar os itens",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to restore multiple from trash:", err);
-      toast.error(err.message || "Failed to restore items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível restaurar os itens");
     }
   }, [getChannelId]);
 
@@ -634,8 +791,16 @@ export function useFileActions() {
       const targets = files.filter(isTargetOrInFolder);
       const active = files.filter((f) => !isTargetOrInFolder(f));
 
-      toast.success(`Deleted ${fileIds.length} item(s) permanently`);
-      await applyOptimistic(channelId, active, { eventType: "files.deleted", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        active,
+        { eventType: "files.deleted", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Excluindo ${fileIds.length} itens…`,
+          success: `${fileIds.length} item(ns) excluído(s) permanentemente`,
+          errorFallback: "Não foi possível excluir os itens",
+        }
+      );
 
       // After the index commits, asynchronously clear cache & delete telegram messages in background
       void (async () => {
@@ -658,7 +823,7 @@ export function useFileActions() {
       })();
     } catch (err: any) {
       console.error("Failed to delete multiple permanently:", err);
-      toast.error(err.message || "Failed to delete items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível excluir os itens");
     }
   }, [getChannelId]);
 
@@ -685,11 +850,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Archived ${fileIds.length} item(s)`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.archived", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.archived", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Arquivando ${fileIds.length} itens…`,
+          success: `${fileIds.length} item(ns) arquivado(s)`,
+          errorFallback: "Não foi possível arquivar os itens",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to archive multiple:", err);
-      toast.error(err.message || "Failed to archive items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível arquivar os itens");
     }
   }, [getChannelId]);
 
@@ -716,11 +889,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Starred ${fileIds.length} item(s)`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.starred", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.starred", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Salvando ${fileIds.length} itens…`,
+          success: `${fileIds.length} item(ns) adicionado(s) aos favoritos`,
+          errorFallback: "Não foi possível salvar os itens nos favoritos",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to star multiple:", err);
-      toast.error(err.message || "Failed to star items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível salvar os itens nos favoritos");
     }
   }, [getChannelId]);
 
@@ -747,11 +928,19 @@ export function useFileActions() {
         return f;
       });
 
-      toast.success(`Moved ${fileIds.length} item(s) back to My Drive`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.unarchived", eventPayload: { count: fileIds.length } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.unarchived", eventPayload: { count: fileIds.length } },
+        {
+          pending: `Movendo ${fileIds.length} itens de volta ao Meu Drive…`,
+          success: `${fileIds.length} item(ns) movido(s) para o Meu Drive`,
+          errorFallback: "Não foi possível desarquivar os itens",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to unarchive multiple:", err);
-      toast.error(err.message || "Failed to unarchive items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível desarquivar os itens");
     }
   }, [getChannelId]);
 
@@ -764,12 +953,10 @@ export function useFileActions() {
         const nextOffline = currentFile ? !currentFile.offline : !file.offline;
 
         if (nextOffline) {
-          toast.info(`Downloading "${file.name}" for offline access...`);
+          toast.info(`Baixando "${file.name}" para uso offline…`);
           await cacheFileOffline(channelId, file.messageId, file.id);
-          toast.success(`"${file.name}" is now available offline`);
         } else {
           await removeOfflineCache(file.id);
-          toast.success(`"${file.name}" is no longer available offline`);
         }
 
         // Update the offline flag through the same optimistic + queue path
@@ -781,10 +968,21 @@ export function useFileActions() {
           .files.map((f) =>
             f.id === file.id ? { ...f, offline: nextOffline } : f
           );
-        await applyOptimistic(channelId, updatedFiles, { eventType: "file.offlineToggled", eventPayload: { name: file.name, offline: nextOffline } });
+        await applyOptimisticWithFeedback(
+          channelId,
+          updatedFiles,
+          { eventType: "file.offlineToggled", eventPayload: { name: file.name, offline: nextOffline } },
+          {
+            pending: nextOffline ? "Ativando offline…" : "Removendo do offline…",
+            success: nextOffline
+              ? `"${file.name}" agora está disponível offline`
+              : `"${file.name}" não está mais disponível offline`,
+            errorFallback: "Não foi possível atualizar o status offline",
+          }
+        );
       } catch (err: any) {
         console.error("Failed to toggle offline availability:", err);
-        toast.error(err.message || "Failed to update offline status");
+        if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível atualizar o status offline");
       }
     });
   }, [getChannelId]);
@@ -800,7 +998,7 @@ export function useFileActions() {
       const selectedFiles = files.filter((f) => selectedIdSet.has(f.id));
 
       if (selectedFiles.length === 0) {
-        toast.info("Nothing to move");
+        toast.info("Nada para mover");
         return;
       }
 
@@ -809,7 +1007,7 @@ export function useFileActions() {
           (f) => isFolder(f) && getFolderFullPath(f) === normalizedTargetPath
         );
         if (!targetFolderExists) {
-          throw new Error("Destination folder no longer exists.");
+          throw new Error("A pasta de destino não existe mais.");
         }
       }
 
@@ -821,7 +1019,7 @@ export function useFileActions() {
 
       for (const { folder, fullPath } of selectedFolderPaths) {
         if (isSameOrDescendantPath(normalizedTargetPath, fullPath)) {
-          throw new Error(`Cannot move folder "${folder.name}" into itself or its subfolders.`);
+          throw new Error(`Não é possível mover a pasta "${folder.name}" para dentro dela mesma ou de suas subpastas.`);
         }
       }
 
@@ -875,15 +1073,23 @@ export function useFileActions() {
 
       const hasChanges = updatedFiles.some((file, index) => file !== files[index]);
       if (!hasChanges) {
-        toast.info("Items are already in that folder");
+        toast.info("Os itens já estão nessa pasta");
         return;
       }
 
-      toast.success(`Successfully moved ${fileIds.length} item(s)`);
-      await applyOptimistic(channelId, updatedFiles, { eventType: "files.moved", eventPayload: { count: fileIds.length, target: targetFolderPath } });
+      await applyOptimisticWithFeedback(
+        channelId,
+        updatedFiles,
+        { eventType: "files.moved", eventPayload: { count: fileIds.length, target: targetFolderPath } },
+        {
+          pending: `Movendo ${fileIds.length} itens…`,
+          success: `${fileIds.length} item(ns) movido(s)`,
+          errorFallback: "Não foi possível mover os itens",
+        }
+      );
     } catch (err: any) {
       console.error("Failed to move items:", err);
-      toast.error(err.message || "Failed to move items");
+      if (!err?.kumadriveToasted) toast.error(err.message || "Não foi possível mover os itens");
     }
   }, [getChannelId]);
 

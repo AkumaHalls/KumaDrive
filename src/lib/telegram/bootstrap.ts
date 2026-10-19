@@ -1,4 +1,4 @@
-﻿﻿import { getClient } from "./client";
+﻿import { getClient } from "./client";
 import { ensureStorageChannel } from "./channelManager";
 import {
   loadIndex,
@@ -8,6 +8,7 @@ import {
   collapseDuplicateFolders,
   dedupeByContentKey,
   dedupeByMessageId,
+  wasLastIndexCoherent,
 } from "../storage/metadataStore";
 import { useFileStore } from "../../stores/fileStore";
 import { TeleFile } from "../types";
@@ -67,6 +68,16 @@ async function bootstrapKumaDriveInner(
 
   onStatusChange?.("Loading file metadata index...");
   let files = await loadIndex(channelId);
+  // Snapshot IMEDIATO da coerência. O flag de módulo é lido de novo ~12-14s
+  // depois (após o orphan scan), e nesse meio-tempo o gate já foi liberado —
+  // se o usuário abrir Configurações → Armazenamento e clicar "Recalcular",
+  // aquele `loadIndex` (StorageSection) SOBRESCREVERIA o flag, e a leitura
+  // tardia refletiria a leitura NOVA, não a visão da qual `files` foi
+  // derivada. O caso perigoso é o flag lendo `true` para uma base que foi
+  // best-effort: a supressão não dispara, o merge truncado é gravado como
+  // epoch de msgId mais alto, e a perda é permanente. Com o snapshot, a
+  // pergunta é sempre sobre a visão que gerou `files`.
+  const indexWasCoherent = wasLastIndexCoherent();
   try {
     const { syncOfflineStatusWithDisk } = await import("../storage/offlineStorage");
     files = await syncOfflineStatusWithDisk(files);
@@ -104,7 +115,7 @@ async function bootstrapKumaDriveInner(
   useFileStore.getState().setBootstrapComplete(true);
 
 
-  // â”€â”€ Manifest-merge step â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— Manifest-merge step ———————————————————————————————————————————————
   // The local backup manifest (kumadrive_backup_manifest_v1 in the vault)
   // is the durable record of every successful device-backup upload: for
   // each entry we know the Telegram messageId and the channel-side
@@ -143,12 +154,27 @@ async function bootstrapKumaDriveInner(
     // Persist to Telegram after the merge. fireAndForgetSaveIndex
     // swallows errors and never throws into the bootstrap flow — a
     // pending enqueueSave (FLOOD_WAIT) cannot block us here.
-    fireAndForgetSaveIndex(channelId, merged);
+    //
+    // Mas SÓ quando a visão do índice é coerente. Se `loadIndex` caiu no
+    // merge best-effort, gravar aqui o transformaria numa epoch coerente
+    // de msgId MAIS ALTO — o que apagaria para sempre chunks antigos que
+    // estavam fora da janela de leitura (100 pinned + 200 recent) e
+    // ressuscitaria arquivos deletados. Era exatamente o que o
+    // `persist=false` do `healAndSave` prometia impedir, e o próprio
+    // caller contornava a garantia. Nesse caso deixamos a visão viver
+    // só em memória até existir uma epoch coerente.
+    if (indexWasCoherent) {
+      fireAndForgetSaveIndex(channelId, merged);
+    } else {
+      await invoke("log_vault_state", {
+        state: "BOOTSTRAP_INDEX_SAVE_SUPPRESSED reason=best_effort_view",
+      }).catch(() => {});
+    }
   } catch (manifestErr) {
     console.warn("[bootstrap] manifest merge failed (continuing):", manifestErr);
   }
 
-  // â”€â”€ Orphan recovery (SYNCHRONOUS — must finish before bootstrap completes) â”€â”€
+  // —— Orphan recovery (SYNCHRONOUS — must finish before bootstrap completes) ——
   // The previous "background" version was the root cause of a data-loss bug:
   // the user could upload/move a file BEFORE recovery finished, the queue
   // would write the partial state (new file only) to Telegram, and the next
@@ -346,10 +372,32 @@ async function bootstrapKumaDriveInner(
         // delete. The in-memory store is already correct; the next user
         // action will trigger another enqueueSave with the same merged
         // state, so no data is lost.
+        //
+        // Persistimos `finalState`, NÃO `cleaned`. São arrays diferentes:
+        // `cleaned` vem do scan e não contém as entradas de usuário que
+        // `mergeWithUserPreference` reinseriu. Gravei `cleaned` aqui e a
+        // store recebia `finalState` — o Telegram ficava com o índice
+        // mais antigo, e um arquivo que o usuário tivesse uploaded
+        // durante o scan sumia do Drive no cold start seguinte, sem
+        // erro em lugar nenhum. "A próxima ação do usuário corrige" não
+        // vale: se ele não fizer nada, o índice truncado persiste.
         await invoke("log_vault_state", {
-          state: `BOOTSTRAP_ORPHAN_RECOVER count=${newOrphans.length} total=${cleaned.length}`,
+          state: `BOOTSTRAP_ORPHAN_RECOVER count=${newOrphans.length} total=${finalState.length}`,
         }).catch(() => {});
-        fireAndForgetSaveIndex(channelId, cleaned);
+        // Mesma supressão do save do manifest-merge: se a base era o
+        // merge best-effort, gravar `finalState` transformaria a visão
+        // truncada na epoch de msgId mais alta — apagando chunks antigos
+        // fora da janela de leitura e ressuscitando arquivos deletados.
+        // Os orfãos recuperados continuam em memória e serão gravados na
+        // próxima ação do usuário (ou no próximo cold start com epoch
+        // coerente).
+        if (indexWasCoherent) {
+          fireAndForgetSaveIndex(channelId, finalState);
+        } else {
+          await invoke("log_vault_state", {
+            state: "BOOTSTRAP_ORPHAN_SAVE_SUPPRESSED reason=best_effort_view",
+          }).catch(() => {});
+        }
       }
     }
 
@@ -392,24 +440,46 @@ async function bootstrapKumaDriveInner(
   // Fire the orphan-recovery block in the background — we no longer await
   // it because the gate was already released above. Awaiting would block
   // bootstrap's return value and keep App.tsx's `setIsRestoring(false)`
-  // pending. The IIFE + 14s race still bounds the recovery so a hung
-  // GramJS request doesn't leak forever; any recovered files are merged
-  // into state.files via setFiles() inside the IIFE and will be picked
-  // up by the next user action's saveIndex.
+  // pending.
+  //
+  // O timeout de 14s é uma rede de segurança contra um request do GramJS
+  // que nunca responde. A versão anterior usava `void Promise.race(...)`
+  // com um `setTimeout` que NUNCA era cancelado — então todo bootstrap que
+  // terminava em 2s ainda disparava o timer aos 14s e gravava
+  // "BOOTSTRAP_ORPHAN_SCAN_HARD_TIMEOUT" no vault_state.log. Como esse log
+  // é a fonte de diagnóstico do sistema, cada startup rápido produzia um
+  // falso positivo de timeout e apontava quem depurasse para o lugar
+  // errado. Agora o timer é cancelado quando o scan termina.
+  let scanHardTimeout: ReturnType<typeof setTimeout> | null = null;
+  const scanFinished = new Promise<void>((resolve) => {
+    orphanScanBlock
+      .catch(() => {
+        // O próprio bloco já trata e loga o erro; aqui só sincronizamos.
+      })
+      .finally(() => resolve());
+  });
   void Promise.race([
-    orphanScanBlock,
+    scanFinished,
     new Promise<void>((resolve) => {
-      setTimeout(() => {
+      scanHardTimeout = setTimeout(() => {
         void invoke("log_vault_state", {
           state: "BOOTSTRAP_ORPHAN_SCAN_HARD_TIMEOUT: 14s safety net triggered",
         }).catch(() => {});
         console.warn(
-          "[bootstrap] Orphan-scan block exceeded 14s hard timeout — releasing bootstrap gate",
+          "[bootstrap] Orphan-scan block exceeded 14s hard timeout — bootstrap will proceed without recovery",
         );
         resolve();
       }, 14000);
     }),
-  ]);
+  ]).finally(() => {
+    // Caminho normal (scan terminou) E caminho de timeout: nos dois,
+    // cancela o timer. No segundo ele já disparou, e `clearTimeout` em um
+    // timer expirado é no-op.
+    if (scanHardTimeout) {
+      clearTimeout(scanHardTimeout);
+      scanHardTimeout = null;
+    }
+  });
 
   // Gate was released right after `setFiles(files)` near the top of this
   // function. We do NOT re-set it here — doing so would clobber the early
@@ -603,14 +673,22 @@ function mergeWithUserPreference(
     }
   }
 
-  // Add user-only entries that have no Telegram messageId match (purely
-  // local — pending uploads, optimistic placeholders, etc.). These never
-  // appear in `recovered` because Telegram doesn't know about them yet.
+  // Add user-only entries that have no recovered counterpart: purely local
+  // pending uploads, optimistic placeholders, AND — corrigido — arquivos
+  // que o Telegram ainda conhece mas o scan não recuperou.
+  //
+  // O filtro antigo só mantinha entradas com `messageId <= 0`, sob a
+  // premissa de que "messageId > 0 sempre aparece em `recovered`". Isso
+  // é FALSO, e o caso não é exótico: `dedupeByContentKey` (mesmo nome +
+  // mesmo tamanho + mesma pasta) descarta uma das cópias na montagem de
+  // `recovered`, e essa cópia entra em `userOnly` com messageId válido.
+  // Ela sumia do store E do índice — o usuário via o arquivo desaparecer.
+  //
+  // Agora empurramos QUALQUER entrada de `userOnly` que não tenha sido
+  // reconciliada acima. O pior caso de manter uma a mais é um índice com
+  // uma entrada obsoleta; o pior caso de descartar é perder o arquivo.
   for (const f of userOnly) {
-    const id = Number(f.messageId);
-    if (!Number.isFinite(id) || id <= 0) {
-      merged.push(f);
-    }
+    merged.push(f);
   }
 
   if (userOverrides > 0) {

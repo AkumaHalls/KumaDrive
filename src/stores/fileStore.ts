@@ -1,4 +1,4 @@
-﻿﻿import { create } from "zustand";
+﻿import { create } from "zustand";
 import { TeleFile, UploadItem } from "../lib/types";
 import { filterJunkFiles } from "../lib/storage/fileSanitizer";
 
@@ -74,7 +74,7 @@ interface FileState {
   setIndexQueueState: (state: IndexQueueState) => void;
   setIndexQueueRetryInSec: (secs: number) => void;
   setIndexQueueError: (err: string | null) => void;
-  /** Mark initial bootstrap (loadIndex â†’ setFiles) as complete. */
+  /** Mark initial bootstrap (loadIndex → setFiles) as complete. */
   setBootstrapComplete: (v: boolean) => void;
   /**
    * Merge remote deltas (multi-device sync) into the in-memory file list
@@ -132,7 +132,28 @@ export const useFileStore = create<FileState>((set, get) => ({
   indexQueueState: "idle",
   indexQueueRetryInSec: 0,
   indexQueueError: null,
-  bootstrapComplete: initialFiles.length > 0 || wasBootstrapCompleted,
+  /**
+ * O gate é "o índice do canal já foi lido, então é seguro reescrevê-lo".
+ *
+ * Mantido como `||` de propósito. Considerei trocar por `&&` para
+ * impedir `bootstrapComplete === true` com `files` vazio, mas isso é
+ * ERRADO e quebra dois casos legítimos:
+ *
+ *   - drive legitimamente vazio: o bootstrap termina, `setBootstrapComplete(true)`
+ *     grava o flag, mas o cache fica `[]`. Com `&&` o gate reabriria
+ *     `false` em toda abertura e o app re-escanearia o canal sem parar.
+ *   - sessão nova com cache válido: `sessionStorage` é por sessão, então
+ *     o flag é `false` ao abrir, mas o cache do localStorage tem os
+ *     arquivos. Com `&&` o gate nunca abriria no boot.
+ *
+ * A proteção contra o estado perigoso (`true` + `files: []`) é feita no
+ * ponto certo: o flag passa a ser REMOVIDO quando o gate fecha —
+ * `setBootstrapComplete(false)` faz `removeItem`, e `authStore.logout()`
+ * limpa a flag junto com o cache. Sem isso, deslogar deixava o flag
+ * "true" com o cache vazio, e o uploadManager tratava isso como "índice
+ * carregado" e sobrescrevia o canal com uma lista vazia.
+ */
+bootstrapComplete: initialFiles.length > 0 || wasBootstrapCompleted,
   lastIndexMsgId: 0,
   lastRemoteSyncAt: null,
   lastBackupAt: null,
@@ -193,9 +214,25 @@ export const useFileStore = create<FileState>((set, get) => ({
   setIndexQueueRetryInSec: (indexQueueRetryInSec) =>
     set({ indexQueueRetryInSec }),
   setIndexQueueError: (indexQueueError) => set({ indexQueueError }),
+  /**
+   * Marca o bootstrap como concluído (ou não).
+   *
+   * O flag em `sessionStorage` é o que sobrevive ao reload e evita refazer
+   * o bootstrap. Ele precisa ser REMOVIDO quando o valor vai a `false`:
+   * os chamadores que deslogavam usavam `setState` cru (pulando esta
+   * action), então o flag continuava "true" enquanto o `logout()` apagava
+   * o cache de arquivos. No reload seguinte isso produzia o estado
+   * `bootstrapComplete === true` com `files.length === 0` — que
+   * `uploadManager` tratava como "índice carregado, pode escrever" e
+   * sobrescrevia o índice inteiro do canal com uma lista vazia.
+   */
   setBootstrapComplete: (bootstrapComplete) => {
-    if (bootstrapComplete && typeof sessionStorage !== "undefined") {
-      sessionStorage.setItem("kumadrive_bootstrap_done", "true");
+    if (typeof sessionStorage !== "undefined") {
+      if (bootstrapComplete) {
+        sessionStorage.setItem("kumadrive_bootstrap_done", "true");
+      } else {
+        sessionStorage.removeItem("kumadrive_bootstrap_done");
+      }
     }
     set({ bootstrapComplete });
   },

@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
   Smartphone,
   Database,
@@ -99,12 +99,16 @@ export default function TelegramAccountSection() {
 
       logout();
       const { useFileStore } = await import("@/stores/fileStore");
+      // `bootstrapComplete` via action, não via `setState`: só a action
+      // remove o flag `kumadrive_bootstrap_done` do sessionStorage. Com
+      // `setState` o flag sobrevivia à desconexão e o reload seguinte
+      // abria com o gate de upload liberado e `files` vazio.
+      useFileStore.getState().setBootstrapComplete(false);
       useFileStore.setState({
         files: [],
         selectedIds: [],
         selectedIdsSet: new Set(),
         currentFolder: "/",
-        bootstrapComplete: false,
       });
 
       toast.success("Conta do Telegram desconectada com sucesso.");
@@ -280,7 +284,7 @@ export default function TelegramAccountSection() {
             </DialogDescription>
           </DialogHeader>
           <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-xs text-amber-800 dark:text-amber-300 leading-relaxed font-medium">
-            âš ï¸ <strong>Atenção:</strong> Trocar de canal de armazenamento reinicia o cache local. O KumaDrive procurará um manifesto existente no canal selecionado ou criará um novo.
+            ⚠️ <strong>Atenção:</strong> Trocar de canal de armazenamento reinicia o cache local. O KumaDrive procurará um manifesto existente no canal selecionado ou criará um novo.
           </div>
           <DialogFooter className="gap-2 sm:gap-0 mt-4">
             <Button

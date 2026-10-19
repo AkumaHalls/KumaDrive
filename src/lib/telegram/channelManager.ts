@@ -1,4 +1,4 @@
-﻿﻿import { Api } from "telegram";
+﻿import { Api } from "telegram";
 import { getClient } from "./client";
 import { getSecret, saveSecret, VAULT_KEY_CHANNEL_ID, channelIdKey } from "../secure/vault";
 
@@ -16,6 +16,51 @@ const STORAGE_CHANNEL_TITLES = ["KumaDrive Storage", "TeleDrive Storage"] as con
 
 function isStorageChannelTitle(title: string): boolean {
   return (STORAGE_CHANNEL_TITLES as readonly string[]).includes(title.trim());
+}
+
+/**
+ * O erro significa "esta entidade/channel não existe" — diferente de
+ * "não consegui falar com o Telegram agora".
+ *
+ * A distinção é crítica em `ensureStorageChannel`: tratar uma falha de
+ * rede — ou uma sessão revogada — como "canal sumiu" levava o fluxo a
+ * CRIAR um canal novo e sobrescrever o id guardado no vault, apontando
+ * o drive para um canal vazio enquanto o original (com todos os
+ * arquivos) continuava intocado e sem referência. Perda aparente de
+ * tudo, sem nenhum aviso.
+ *
+ * Só entram erros que PROVAM que a ENTIDADE não existe mais: o canal
+ * foi apagado, o id guardado está errado, ou a conta perdeu acesso a
+ * ele.
+ *
+ * `AUTH_KEY_UNREGISTERED` NÃO entra, apesar do código 401: ele significa
+ * "esta conta foi removida deste dispositivo", não "o canal sumiu". O
+ * canal continua lá com todos os arquivos. Classifier como entidade
+ * morta faria o app criar um canal novo em CADA sessão revogada —
+ * exatamente a perda de dados que este helper existe para evitar.
+ * Ele propaga para cima, e o chamador mostra "reconecte sua conta".
+ */
+function isMissingEntityError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+
+  // Auth primeiro, com Return antecipado: precisa vencer qualquer outro
+  // padrão da mensagem antes de qualquer outra checagem.
+  if (/AUTH_KEY_UNREGISTERED|SESSION_REVOKED|SESSION_EXPIRED/i.test(msg)) {
+    return false;
+  }
+
+  // Só trata como "entidade morta" o que nomeia o PEER. Um 400/403
+  // genérico (ex.: flood limit) sem menção ao canal não prova nada.
+  const namesPeer =
+    /CHANNEL_INVALID|PEER_ID_INVALID|CHANNEL_PRIVATE|CHAT_WRITE_FORBIDDEN|USER_BANNED_IN_CHANNEL|NOCHAT|CHAT_ID_INVALID/i.test(
+      msg,
+    );
+  if (namesPeer) return true;
+
+  // Código RPC sem nome de peer: conservadoramente NÃO é entidade morta.
+  // Preferimos falhar e pedir novo login a criar um canal e perder o
+  // acesso aos dados do usuário.
+  return false;
 }
 
 /**
@@ -38,7 +83,7 @@ export async function ensureStorageChannel(phone: string): Promise<string> {
   const client = getClient();
   const phoneKey = channelIdKey(phone);
 
-  // â”€â”€ 1. Phone-specific vault key (fast path) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— 1. Phone-specific vault key (fast path) ——————————————————————————————
   let channelId = await getSecret(phoneKey);
 
   if (channelId) {
@@ -46,12 +91,21 @@ export async function ensureStorageChannel(phone: string): Promise<string> {
       const peer = await client.getEntity(channelId);
       if (peer) return channelId;
     } catch (err) {
-      console.warn(`[channelManager] Phone-keyed channel ${channelId} not accessible, continuing…`, err);
+      // Distingue "o canal não existe mais" de "não consegui falar com o
+      // Telegram agora". Antes, TODO erro zerava o channelId e caía até
+      // o passo 4, que CRIAVA um canal novo e sobrescrevia a chave do
+      // vault com o id novo. Duas falhas de rede seguidas no login
+      // faziam o drive aparecer vazio e o id do canal original sumir —
+      // sem nenhum aviso ao usuário.
+      if (!isMissingEntityError(err)) {
+        throw err;
+      }
+      console.warn(`[channelManager] Channel ${channelId} no longer exists, searching dialogs…`);
       channelId = null;
     }
   }
 
-  // â”€â”€ 2. Legacy generic key (migration path for existing installs) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— 2. Legacy generic key (migration path for existing installs) —————————
   if (!channelId) {
     const legacyId = await getSecret(VAULT_KEY_CHANNEL_ID);
     if (legacyId) {
@@ -60,16 +114,17 @@ export async function ensureStorageChannel(phone: string): Promise<string> {
         if (peer) {
           // Migrate: write under the phone-specific key so future lookups are fast
           await saveSecret(phoneKey, legacyId);
-          console.info(`[channelManager] Migrated legacy channel ID ${legacyId} â†’ ${phoneKey}`);
+          console.info(`[channelManager] Migrated legacy channel ID ${legacyId} → ${phoneKey}`);
           return legacyId;
         }
       } catch (err) {
-        console.warn(`[channelManager] Legacy channel ${legacyId} not accessible, searching dialogs…`, err);
+        if (!isMissingEntityError(err)) throw err;
+        console.warn(`[channelManager] Legacy channel ${legacyId} no longer exists, searching dialogs…`);
       }
     }
   }
 
-  // â”€â”€ 3. Search dialogs for "KumaDrive Storage" â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // —— 3. Search dialogs for "KumaDrive Storage" ————————————————————————————
   try {
     const dialogs = await client.getDialogs({});
     for (const dialog of dialogs) {
@@ -87,10 +142,18 @@ export async function ensureStorageChannel(phone: string): Promise<string> {
       }
     }
   } catch (err) {
+    // Rede falhou de novo. Criar um canal agora seria_data-loss puro:
+    // o canal original continua existindo com todos os arquivos, e nós
+    // trocaríamos o id guardado,_pointando o drive para um canal vazio.
+    if (!isMissingEntityError(err)) throw err;
     console.warn("[channelManager] Dialog search failed:", err);
   }
 
-  // â”€â”€ 4. Create a new private channel (first-ever login for this account) â”€â”€
+  // —— 4. Create a new private channel (first-ever login for this account) —
+  //
+  // Só chega aqui se o vault não tinha id, ou se o id guardado realmente
+  // não existe mais (confirmado por `isMissingEntityError` acima). Nunca
+  // por falha de rede.
   try {
     const result = await client.invoke(
       new Api.channels.CreateChannel({

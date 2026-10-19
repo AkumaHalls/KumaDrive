@@ -142,7 +142,7 @@ export async function processQueue(): Promise<void> {
     }
 
     if (!channelId) {
-      toast.error("Telegram storage channel is not configured. Please check settings.");
+      toast.error("O canal de armazenamento do Telegram não está configurado. Verifique as configurações.");
       await invoke("log_vault_state", { state: "PROCESS_QUEUE: channelId is empty/null" }).catch(() => {});
       isProcessing = false;
       return;
@@ -236,58 +236,105 @@ export async function processQueue(): Promise<void> {
           }
 
           let existingFiles = useFileStore.getState().files;
+          // Distingue "o canal está genuinamente vazio" de "não consegui
+          // ler o índice". Sem esta flag, uma falha de rede em loadIndex
+          // deixava `existingFiles = []` e o código seguia para gravar um
+          // índice contendo SÓ o arquivo novo — apagando da nuvem todo o
+          // conteúdo que o usuário tinha. O arquivo já estava no Telegram
+          // (fase 1), então desistir do merge deixa um órfão que o
+          // orphan-scan recupera; o inverso perde a conta inteira.
+          let baselineKnown = true;
           if (existingFiles.length === 0) {
             try {
               const { loadIndex } = await import("../storage/metadataStore");
               existingFiles = await loadIndex(channelId);
             } catch (err) {
               console.warn("[uploadManager] Direct loadIndex fallback error:", err);
+              baselineKnown = false;
             }
           }
 
-          const optimisticFiles = [
-            ...existingFiles.filter((f) => f.id !== newFile.id),
-            newFile,
-          ];
-          setFiles(optimisticFiles);
-          useFileStore.getState().setBootstrapComplete(true);
-
-          updateQueueItem(item.id, { status: "done", progress: 100 });
-          toast.success(`"${item.name}" uploaded successfully!`);
-
-          try {
-            await enqueueSave(channelId, optimisticFiles);
-            await invoke("log_vault_state", {
-              state: `UPLOAD_INDEX_OK name=${item.name} files=${optimisticFiles.length}`,
-            }).catch(() => {});
-            logEvent({
-              type: "file.uploaded",
-              payload: { name: item.name, size: Number(newFile.size) || 0 },
+          if (!baselineKnown) {
+            // Não temos o índice anterior. Gravar agora destruiria o
+            // conteúdo do canal. Mantemos o upload (o blob já subiu) e
+            // deixamos o órfão para o scan de recuperação.
+            //
+            // if/else em vez de `continue`: este código está dentro de um
+            // `for` cujo corpo tem um try/catch externo, e o `continue`
+            // cruzava a fronteira da função (erro TS1107 do compilador).
+            updateQueueItem(item.id, { status: "done", progress: 100 });
+            toast.warning(`"${item.name}" enviado, mas o índice não pôde ser lido`, {
+              description:
+                "O arquivo está no canal, mas o índice não foi atualizado para não sobrescrever seus outros arquivos. Ele será recuperado na próxima sincronização.",
             });
-          } catch (indexErr: any) {
-            // Hard error from the queue (auth lost, channel missing, etc.).
-            // Roll back the optimistic files array for this single upload by
-            // removing the just-added entry; transient errors are swallowed
-            // by the queue and the entry will retry on its own.
-            const isHard =
-              /AUTH_KEY_UNREGISTERED|SESSION_REVOKED|CHANNEL_PRIVATE|PEER_ID_INVALID|CHAT_WRITE_FORBIDDEN|JSON/i.test(
-                indexErr?.message ?? ""
-              );
-            if (isHard) {
-              const rolled = useFileStore
-                .getState()
-                .files.filter((f) => f.id !== newFile.id);
-              useFileStore.getState().setFiles(rolled);
+            await invoke("log_vault_state", {
+              state: `UPLOAD_INDEX_SKIPPED_NO_BASELINE name=${item.name}`,
+            }).catch(() => {});
+          } else {
+            const optimisticFiles = [
+              ...existingFiles.filter((f) => f.id !== newFile.id),
+              newFile,
+            ];
+            setFiles(optimisticFiles);
+            useFileStore.getState().setBootstrapComplete(true);
+
+            // `progress: 100` aqui, mas o "uploaded successfully" só
+            // DEPOIS do enqueueSave. A ordem antiga anunciava sucesso
+            // antes de o índice ser gravado: se o IndexQueue esgotasse
+            // os retries (a msg de erro não casa com o regex `isHard`),
+            // o ramo transient era mudo — o usuário via a barra verde e o
+            // toast de sucesso, o blob estava no Telegram, mas o arquivo
+            // NUNCA aparecia no drive, sem nenhuma explicação.
+            updateQueueItem(item.id, { progress: 100 });
+
+            try {
+              await enqueueSave(channelId, optimisticFiles);
+              updateQueueItem(item.id, { status: "done", progress: 100 });
+              toast.success(`"${item.name}" enviado com sucesso!`);
               await invoke("log_vault_state", {
-                state: `UPLOAD_INDEX_HARD_ERR rolled name=${item.name} err=${indexErr?.message ?? indexErr}`,
+                state: `UPLOAD_INDEX_OK name=${item.name} files=${optimisticFiles.length}`,
               }).catch(() => {});
-              toast.error(
-                `Index save failed for "${item.name}" — refresh the drive.`
-              );
-            } else {
-              await invoke("log_vault_state", {
-                state: `UPLOAD_INDEX_TRANSIENT_ERR name=${item.name} err=${indexErr?.message ?? indexErr}`,
-              }).catch(() => {});
+              logEvent({
+                type: "file.uploaded",
+                payload: { name: item.name, size: Number(newFile.size) || 0 },
+              });
+            } catch (indexErr: any) {
+              // Hard error from the queue (auth lost, channel missing, etc.).
+              // Roll back the optimistic files array for this single upload by
+              // removing the just-added entry; transient errors are swallowed
+              // by the queue and the entry will retry on its own.
+              const isHard =
+                /AUTH_KEY_UNREGISTERED|SESSION_REVOKED|CHANNEL_PRIVATE|PEER_ID_INVALID|CHAT_WRITE_FORBIDDEN|JSON/i.test(
+                  indexErr?.message ?? ""
+                );
+              if (isHard) {
+                const rolled = useFileStore
+                  .getState()
+                  .files.filter((f) => f.id !== newFile.id);
+                useFileStore.getState().setFiles(rolled);
+                await invoke("log_vault_state", {
+                  state: `UPLOAD_INDEX_HARD_ERR rolled name=${item.name} err=${indexErr?.message ?? indexErr}`,
+                }).catch(() => {});
+                toast.error(
+                  `Falha ao salvar o índice de "${item.name}" — recarregue o Drive.`
+                );
+              } else {
+                // Esgotou os retries (ou falhou de forma transitória): o
+                // blob está no canal mas não entrou no índice. O usuário
+                // PRECISA saber disso, senão o arquivo simplesmente nunca
+                // aparece.
+                updateQueueItem(item.id, { status: "done", progress: 100 });
+                await invoke("log_vault_state", {
+                  state: `UPLOAD_INDEX_TRANSIENT_ERR name=${item.name} err=${indexErr?.message ?? indexErr}`,
+                }).catch(() => {});
+                toast.warning(
+                  `"${item.name}" foi enviado, mas não entrou no índice`,
+                  {
+                    description:
+                      "O arquivo está no canal, porém o índice não pôde ser salvo e o drive pode não listá-lo. Tente sincronizar; se persistir, reenvie o arquivo.",
+                  }
+                );
+              }
             }
           }
         } catch (err: any) {
@@ -299,7 +346,14 @@ export async function processQueue(): Promise<void> {
             status: "error",
             error: err.message || "Upload failed",
           });
-          toast.error(`Failed to upload "${item.name}": ${err.message || "Unknown error"}`);
+          // Mensagem de DEV para usuário de produto. Mapeamos o caso mais
+          // comum (relaunch sem cliente — bug CRÍTICO da rodada 4) para um
+          // texto acionável; o resto vira texto do usuário em PT-BR.
+          const rawMsg = err.message || "erro desconhecido";
+          const userMsg = /TelegramClient not initialized/i.test(rawMsg)
+            ? "Sessão do Telegram não inicializada — saia e entre novamente."
+            : rawMsg;
+          toast.error(`Falha ao enviar "${item.name}": ${userMsg}`);
         } finally {
           // Re-trigger processQueue to pull the next pending items
           processQueue();
@@ -337,7 +391,7 @@ export function addFilesToUploadQueue(
     }
 
     if (file.size === 0) {
-      toast.error(`"${file.name}" is empty. Empty files (0 bytes) are not supported by Telegram.`, {
+      toast.error(`"${file.name}" está vazio. Arquivos vazios (0 bytes) não são suportados pelo Telegram.`, {
         duration: 4000,
       });
       return;

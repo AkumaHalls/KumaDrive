@@ -1,9 +1,16 @@
-import { lazy, Suspense, useState, useEffect } from "react";
+import { lazy, Suspense, useState, useEffect, useRef } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useAuthStore } from "./stores/authStore";
 import { useTheme } from "./hooks/useTheme";
 import { Loader2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
+import { Toaster } from "./components/ui/sonner";
+import { BackupProgressOverlay } from "./components/backup/BackupProgressOverlay";
+import { UpdateDialog } from "./components/update/UpdateDialog";
+import RemoteSyncOrchestrator from "./components/RemoteSyncOrchestrator";
+import { IndexQueuePill } from "./components/IndexQueuePill";
+import { useUpdateStore } from "./stores/updateStore";
 import DriveBrowserPage from "./pages/DriveBrowserPage";
 import RecentPage from "./pages/RecentPage";
 import StarredPage from "./pages/StarredPage";
@@ -67,6 +74,8 @@ function App() {
   useTheme();
   const [isRestoring, setIsRestoring] = useState(true);
   const [status] = useState("Conectando ao Telegram...");
+  // Garante uma checagem de update por sessão, mesmo com StrictMode.
+  const updateCheckedRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -101,12 +110,43 @@ function App() {
             const { useFileStore } = await import("./stores/fileStore");
             useFileStore.getState().setSyncing(true);
             try {
-              const restored = await invoke("restore_session");
-              if (restored) {
-                await invoke("bootstrap_telegram", { phone: phoneNumber });
+              // COMANDOS RUST QUE NÃO EXISTEM — este era o bug CRÍTICO da
+              // auditoria round 4. Aqui havia `invoke("restore_session")`
+              // e `invoke("bootstrap_telegram", ...)`: nenhum dos dois está
+              // registrado no `generate_handler!` de lib.rs, então o await
+              // rejeitava com "command not found", o catch fazia só
+              // `console.error` e o cliente GramJS NUNCA era criado ao
+              // reabrir o app. A sessão carregava (a UI parecia normal,
+              // servindo o cache local), mas TUDO que tocava o Telegram
+              // falhava: upload → toast de erro em inglês, pull-to-refresh
+              // e download → engolidos em silêncio, sync loop → poluindo o
+              // console para sempre.
+              //
+              // O caminho correto é o JS pronto que já existia para isso
+              // (`restoreSession.ts` — antes órfão, nunca importado):
+              // lê a sessão, resolve as credenciais do vault, chama
+              // `initClient` e verifica `isUserAuthorized`. Se autorizado,
+              // roda o mesmo `bootstrapKumaDrive` do login e do Drive.
+              const { restoreSession } = await import("./lib/telegram/restoreSession");
+              const restored = await restoreSession();
+              if (restored && active) {
+                const { bootstrapKumaDrive } = await import("./lib/telegram/bootstrap");
+                await bootstrapKumaDrive(undefined, phoneNumber ?? "");
               }
             } catch (err) {
+              // Falha visível: a rodada 4 mostrou que este caminho era 100%
+              // silencioso (console.error só) e o app seguia "funcionando"
+              // com cache, sem nunca dizer ao usuário que precisava
+              // reconectar. O `log_vault_state` fica no catch externo, que
+              // nunca era atingido — por isso logamos aqui também.
               console.error("Background session restoration/bootstrap failed:", err);
+              await invoke("log_vault_state", {
+                state: `RESTORE_BOOTSTRAP_ERR: ${err instanceof Error ? err.message : String(err)}`
+              }).catch(() => {});
+              toast.error(
+                "Não foi possível reconectar ao Telegram.",
+                { description: "Suas configurações estão salvas; tentaremos de novo. Se persistir, saia e entre novamente." }
+              );
             } finally {
               if (active) {
                 useFileStore.getState().setSyncing(false);
@@ -130,6 +170,33 @@ function App() {
       active = false;
     };
   }, []);
+
+  // Aviso de versão nova ao abrir.
+  //
+  // Fica ANTES do return condicional do splash por causa das Rules of
+  // Hooks: um hook depois de um `return` antecipado quebra quando a
+  // próxima renderização passa por um caminho diferente (o caso real aqui:
+  // primeiro render mostra o splash, o segundo não).
+  //
+  // Espera `isRestoring` virar false porque enquanto o splash está
+  // montado não existe UI onde o aviso pudesse aparecer. O guard por ref
+  // evita a checagem dupla que o StrictMode provoca em dev.
+  useEffect(() => {
+    if (isRestoring) return;
+    if (updateCheckedRef.current) return;
+    updateCheckedRef.current = true;
+
+    void useUpdateStore
+      .getState()
+      .loadCurrentVersion()
+      .then(() => {
+        // `silent` suprime os toasts de erro — ficar offline é normal e
+        // não deve virar um aviso vermelho a cada abertura. Quando há
+        // update, o diálogo abre em qualquer caso: é o aviso que o usuário
+        // pediu para ver ao abrir o app.
+        void useUpdateStore.getState().checkForUpdates({ silent: true });
+      });
+  }, [isRestoring]);
 
   if (isRestoring) {
     return <SplashLoader status={status} />;
@@ -182,6 +249,39 @@ function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </Suspense>
+
+      {/* Sobreposições globais — precisam ficar FORA do <Routes> para
+          existirem em todas as telas.
+          - Toaster: sem ele TODOS os toast.* do app são silenciosos
+            (o componente existia em sonner.tsx mas nunca era montado).
+          - BackupProgressOverlay: o botão "Fazer backup agora" vive em
+            Configurações (/settings), que NÃO é filho do DriveLayout.
+            Com o overlay preso ao DriveLayout, clicar no backup ali não
+            produzia nenhuma feedback visível. */}
+      <Toaster />
+      <BackupProgressOverlay />
+      <UpdateDialog />
+
+      {/* Estado da fila de índice. Fica flutuante na raiz porque é o único
+          aviso de "falha ao salvar" e o único botão de "Tentar novamente"
+          — preso ao DriveLayout, não aparecia em /settings. */}
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[90] pointer-events-none">
+        <div className="pointer-events-auto">
+          <IndexQueuePill />
+        </div>
+      </div>
+
+      {/* Orquestrador de sync multi-dispositivo + listener do backup
+          agendado. NÃO pode ficar dentro de uma rota: ele é headless e
+          precisa viver enquanto o usuário estiver autenticado, sem
+          depender de estar numa tela específica. Sem este mount,
+          `ensureTickListenerStarted()` nunca era chamado — o timer Rust
+          disparava e ninguém ouvia, então o backup agendado nunca
+          executava — e `startRemoteSync()` nunca era chamado, deixando
+          `lib/sync/remoteSync.ts` inteiro inalcançável. */}
+      <ProtectedRoute>
+        <RemoteSyncOrchestrator />
+      </ProtectedRoute>
     </BrowserRouter>
   );
 }
