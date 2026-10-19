@@ -398,11 +398,7 @@ pub fn run() {
             log_vault_state,
             get_vault_state,
         ])
-        .setup(|_app| {
-            #[cfg(debug_assertions)]
-            if let Some(window) = _app.get_webview_window("KumaDrive") { _app.open_devtools(); }
-            Ok(())
-        })
+        .setup(|_app| Ok(()))
         .run(tauri::generate_context!())
         .expect("erro ao executar aplicação Tauri");
 }
