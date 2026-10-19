@@ -25,8 +25,10 @@ export interface UpdateState {
   availableVersion: string | null;
   /** Release notes, quando o mantenedor escreveu. */
   notes: string | null;
-  /** Diálogo visível. */
+  /** Tela de atualização em tela cheia visível. */
   open: boolean;
+  /** Aviso flutuante do topo dispensado nesta sessão. */
+  noticeDismissed: boolean;
   /** Checagem em andamento (botão "Verificar atualizações"). */
   checking: boolean;
   /** Download/instalação em andamento. */
@@ -34,6 +36,12 @@ export interface UpdateState {
   /** Progresso 0-100 do download. */
   progress: number;
   setOpen: (open: boolean) => void;
+  /** Abre a tela de atualização (usada pelo aviso do topo e por Sobre). */
+  openScreen: () => void;
+  /** Fecha a tela e dispensa o aviso — o usuário já viu a novidade. */
+  closeScreen: () => void;
+  /** Dispensa apenas o aviso do topo, sem abrir a tela. */
+  dismissNotice: () => void;
   setChecking: (checking: boolean) => void;
   /** Busca a versão atual, sem tocar na rede. */
   loadCurrentVersion: () => Promise<void>;
@@ -41,7 +49,11 @@ export interface UpdateState {
    * Consulta o endpoint de updates. Notifica via toast quando o chamador
    * não pediu UI explícita (checagem de fundo no startup).
    */
-  checkForUpdates: (opts?: { silent?: boolean }) => Promise<boolean>;
+  checkForUpdates: (opts?: {
+    silent?: boolean;
+    /** Abre a tela cheia ao encontrar versão nova (padrão: !silent). */
+    openOnFound?: boolean;
+  }) => Promise<boolean>;
   /** Baixa, instala e reinicia. */
   install: () => Promise<void>;
 }
@@ -51,11 +63,15 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   availableVersion: null,
   notes: null,
   open: false,
+  noticeDismissed: false,
   checking: false,
   installing: false,
   progress: 0,
 
   setOpen: (open) => set({ open }),
+  openScreen: () => set({ open: true }),
+  closeScreen: () => set({ open: false, noticeDismissed: true }),
+  dismissNotice: () => set({ noticeDismissed: true }),
   setChecking: (checking) => set({ checking }),
 
   loadCurrentVersion: async () => {
@@ -69,6 +85,11 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   checkForUpdates: async (opts) => {
     const silent = opts?.silent ?? false;
+    // Chamadas explícitas (botão em Configurações → Sobre) abrem a tela
+    // quando acham versão nova. No boot (`silent`) o resultado só alimenta
+    // o aviso do topo — abrir uma tela cheia por cima do splash seria
+    // intrusivo, e o usuário pode não estar pronto para reiniciar o app.
+    const openOnFound = opts?.openOnFound ?? !silent;
     set({ checking: true });
     try {
       const update = await check();
@@ -84,7 +105,9 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         // "você está atualizado" — a mesma tela com as duas informações
         // contraditórias.
         const current = get().currentVersion;
-        set({ availableVersion: null, notes: null });
+        // Zeramos `noticeDismissed`: numa próxima abertura o aviso volta a
+        // ter permissão de aparecer caso surja uma versão nova.
+        set({ availableVersion: null, notes: null, noticeDismissed: false });
         if (!silent) {
           toast.success("Você está atualizado!", {
             description: current
@@ -102,14 +125,17 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         currentVersion: current,
         availableVersion: update.version,
         notes: update.body ?? null,
-        open: true,
+        open: openOnFound,
+        // Versão recém-descoberta reexibe o aviso do topo, mesmo que o
+        // usuário tenha dispensado um aviso anterior nesta sessão.
+        noticeDismissed: false,
       });
 
       // Mantemos o `update` vivo para o botão "Atualizar agora" — quem
-      // fecha o diálogo sem instalar precisa chamar close() (feito em
-      // UpdateDialog via releasePendingUpdate). O `silent` não muda nada
-      // aqui de propósito: o diálogo JÁ é o aviso do usuário, e um toast
-      // junto duplicaria a mesma informação na mesma tela.
+      // fecha a tela sem instalar precisa liberar o handle via
+      // releasePendingUpdate (feito em UpdateScreen). Nada de toast aqui:
+      // o aviso do topo + a tela já comunicam a mesma coisa, e um toast
+      // junto triplicaria a informação na mesma tela.
       getPendingUpdate(update);
       return true;
     } catch (err) {

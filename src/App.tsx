@@ -7,7 +7,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Toaster } from "./components/ui/sonner";
 import { BackupProgressOverlay } from "./components/backup/BackupProgressOverlay";
-import { UpdateDialog } from "./components/update/UpdateDialog";
+import { UpdateNotice } from "./components/update/UpdateNotice";
+import { UpdateScreen } from "./components/update/UpdateScreen";
 import RemoteSyncOrchestrator from "./components/RemoteSyncOrchestrator";
 import { IndexQueuePill } from "./components/IndexQueuePill";
 import { useUpdateStore } from "./stores/updateStore";
@@ -171,18 +172,19 @@ function App() {
     };
   }, []);
 
-  // Aviso de versão nova ao abrir.
+  // Checagem de versão nova ao abrir.
   //
   // Fica ANTES do return condicional do splash por causa das Rules of
   // Hooks: um hook depois de um `return` antecipado quebra quando a
   // próxima renderização passa por um caminho diferente (o caso real aqui:
   // primeiro render mostra o splash, o segundo não).
   //
-  // Espera `isRestoring` virar false porque enquanto o splash está
-  // montado não existe UI onde o aviso pudesse aparecer. O guard por ref
-  // evita a checagem dupla que o StrictMode provoca em dev.
+  // Roda em PARALELO com a restauração da sessão, sem esperar o splash
+  // sumir: assim, quando o app termina de abrir, o aviso do topo já está
+  // pronto. Antes a checagem só começava depois do splash, e a novidade
+  // podia passar batido. O guard por ref evita a checagem dupla que o
+  // StrictMode provoca em dev.
   useEffect(() => {
-    if (isRestoring) return;
     if (updateCheckedRef.current) return;
     updateCheckedRef.current = true;
 
@@ -191,12 +193,14 @@ function App() {
       .loadCurrentVersion()
       .then(() => {
         // `silent` suprime os toasts de erro — ficar offline é normal e
-        // não deve virar um aviso vermelho a cada abertura. Quando há
-        // update, o diálogo abre em qualquer caso: é o aviso que o usuário
-        // pediu para ver ao abrir o app.
-        void useUpdateStore.getState().checkForUpdates({ silent: true });
+        // não deve virar um aviso vermelho a cada abertura. E
+        // `openOnFound: false` impede a tela cheia de abrir por cima do
+        // splash: no boot quem chama a atenção é o aviso do topo.
+        void useUpdateStore
+          .getState()
+          .checkForUpdates({ silent: true, openOnFound: false });
       });
-  }, [isRestoring]);
+  }, []);
 
   if (isRestoring) {
     return <SplashLoader status={status} />;
@@ -260,12 +264,16 @@ function App() {
             produzia nenhuma feedback visível. */}
       <Toaster />
       <BackupProgressOverlay />
-      <UpdateDialog />
+      <UpdateScreen />
 
-      {/* Estado da fila de índice. Fica flutuante na raiz porque é o único
-          aviso de "falha ao salvar" e o único botão de "Tentar novamente"
-          — preso ao DriveLayout, não aparecia em /settings. */}
-      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[90] pointer-events-none">
+      {/* Aviso de nova versão + estado da fila de índice, empilhados no
+          topo central. Ficam flutuantes na raiz porque existem em TODAS as
+          telas: o aviso de atualização é a primeira coisa que o usuário vê
+          ao abrir o app, e a fila de índice é o único aviso de "falha ao
+          salvar" com botão de "Tentar novamente" — presos a uma rota, não
+          apareceriam em /settings nem na tela de login. */}
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[90] w-full px-4 pointer-events-none flex flex-col items-center gap-2">
+        <UpdateNotice />
         <div className="pointer-events-auto">
           <IndexQueuePill />
         </div>

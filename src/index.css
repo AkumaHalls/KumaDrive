@@ -689,3 +689,32 @@
     @apply bg-primary-light text-primary;
   }
 }
+
+/*
+ * Toast: respiro entre o ícone e o texto.
+ *
+ * Precisa ficar FORA de `@layer`. O sonner injeta o CSS dele num <style>
+ * SEM camada, em runtime, e uma regra sem camada vence qualquer regra
+ * dentro de uma camada do Tailwind — independente da especificidade. Por
+ * isso também prefixamos com [data-sonner-toaster]: o seletor fica mais
+ * específico que o do próprio sonner e vence a disputa em dev e em
+ * produção.
+ *
+ * Motivo do bug: o sonner reserva para o ícone um slot `[data-icon]` de
+ * 16x16 com `gap: 6px` e `margin-right: 4px`. O nosso ícone é o círculo
+ * colorido de 32x32 (check/erro/info), então transbordava o slot e
+ * encostava no texto — o "junto demais" relatado. Aqui o slot passa a
+ * acompanhar o tamanho real e o gap ganha folga de verdade.
+ */
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] {
+  gap: 12px;
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-styled="true"] [data-icon] {
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0;
+  margin-right: 0;
+}

@@ -1,4 +1,4 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { Bug, ShieldAlert } from "lucide-react";
 
 const GithubIcon = (props: React.SVGProps<SVGSVGElement>) => (
@@ -27,6 +27,7 @@ export default function AboutSection() {
   const availableVersion = useUpdateStore((s) => s.availableVersion);
   const loadCurrentVersion = useUpdateStore((s) => s.loadCurrentVersion);
   const checkForUpdates = useUpdateStore((s) => s.checkForUpdates);
+  const openScreen = useUpdateStore((s) => s.openScreen);
 
   useEffect(() => {
     void loadCurrentVersion();
@@ -47,14 +48,18 @@ export default function AboutSection() {
    * Verifica atualizações contra a release do GitHub.
    *
    * O trabalho real (rede, assinatura minisign, download, reinício) mora
-   * em `updateStore` / `UpdateDialog`, montados na raiz do app. Aqui só
-   * disparamos a checagem — que abre o mesmo diálogo exibido no startup,
-   * em vez de um segundo caminho de instalação paralelo.
+   * em `updateStore` / `UpdateScreen`, montados na raiz do app. Quando já
+   * existe uma versão nova detectada, apenas abrimos a MESMA tela do aviso
+   * do topo — sem reconsultar a rede.
    */
   const handleCheckUpdates = async () => {
+    if (availableVersion) {
+      openScreen();
+      return;
+    }
     setChecking(true);
     try {
-      await checkForUpdates();
+      await checkForUpdates({ openOnFound: true });
     } finally {
       setChecking(false);
     }
