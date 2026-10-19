@@ -1,85 +1,93 @@
-# Contributing to TeleDrive 🤝
+# Contribuindo com o KumaDrive
 
-First off, thank you for taking the time to contribute! It is contributors like you who keep TeleDrive robust, secure, and accessible for everyone.
+Antes de tudo, obrigado por reservar um tempo para contribuir! É gente como você que mantém o KumaDrive robusto, seguro e acessível para todos.
 
-By contributing to this project, you agree to abide by the terms of the **GNU GPL-3.0 License** under which TeleDrive is distributed.
-
----
-
-## 🗺️ How Can I Contribute?
-
-### 1. Reporting Bugs
-- Search the [Issues](https://github.com/senapati484/teledrive/issues) tracker first to ensure the bug hasn't already been reported.
-- If it's a new issue, open a bug report detailing:
-  - Clear steps to reproduce the behavior.
-  - Expected vs. actual results.
-  - Your operating system version (macOS, Windows, Linux, Android).
-  - Relevant logs (e.g., contents of `app_data_dir/vault_state.log` or browser console errors).
-
-### 2. Suggesting Enhancements
-- Open a feature request on the issues page.
-- Explain the use case and why this feature would benefit most TeleDrive users.
-- Mockups or diagrams of the UI design changes are highly welcome!
-
-### 3. Submitting Pull Requests (PRs)
-- **Fork** the repository and create your branch from `main`.
-- Keep changes focused. Avoid mixing unrelated modifications in a single pull request.
-- Ensure all automated checks (lints, compiler verification) pass locally.
+Ao contribuir com este projeto, você concorda em respeitar os termos da licença **GNU GPL-3.0**, sob a qual o KumaDrive é distribuído.
 
 ---
 
-## 🌿 Git Branching Model
+## Como posso contribuir?
 
-Please adhere to the following branch naming conventions:
-- **Features**: `feature/your-feature-name` (e.g., `feature/custom-themes`)
-- **Bug Fixes**: `bugfix/issue-description` (e.g., `bugfix/otp-input-autofocus`)
-- **Documentation**: `docs/update-description` (e.g., `docs/add-api-schema`)
+### 1. Reportando bugs
+
+- Procure primeiro no [rastreador de Issues](https://github.com/AkumaHalls/KumaDrive/issues) para garantir que o problema ainda não foi reportado.
+- Se for um problema novo, abra um relatório de bug detalhando:
+  - Passos claros para reproduzir o comportamento.
+  - Resultado esperado versus resultado obtido.
+  - Versão do seu sistema operacional (macOS, Windows, Linux).
+  - Logs relevantes (por exemplo, o conteúdo de `app_data_dir/vault_state.log` ou erros do console do navegador).
+
+### 2. Sugerindo melhorias
+
+- Abra uma solicitação de recurso na página de Issues.
+- Explique o caso de uso e por que o recurso beneficiaria a maioria dos usuários do KumaDrive.
+- Mockups ou diagramas das mudanças de interface são muito bem-vindos!
+
+### 3. Enviando Pull Requests (PRs)
+
+- Faça um **fork** do repositório e crie sua branch a partir da `main`.
+- Mantenha as mudanças focadas. Evite misturar modificações não relacionadas em um único pull request.
+- Garanta que todas as verificações automatizadas (linters, compilação) passem localmente.
 
 ---
 
-## 🎨 Coding Standards & Code Quality
+## Modelo de branches do Git
 
-To maintain a clean and readable codebase, we require:
+Siga as convenções de nomenclatura de branch:
+
+- **Funcionalidades**: `feature/nome-da-feature` (ex.: `feature/temas-personalizados`)
+- **Correções de bug**: `bugfix/descricao-do-issue` (ex.: `bugfix/autofocus-otp`)
+- **Documentação**: `docs/descricao-da-mudanca` (ex.: `docs/esquema-da-api`)
+
+---
+
+## Padrões de código e qualidade
+
+Para manter a base de código limpa e legível, exigimos:
 
 ### Frontend (React & TypeScript)
-- **Formatting**: Run Prettier to format files before committing.
-- **TypeScript**: Ensure strict type-safety. Do not use `any` unless absolutely necessary (e.g. interfacing with dynamic raw API responses from GramJS).
-- **Styling**: Use Tailwind CSS utility classes. Avoid creating custom inline styles. Respect both **light** and **dark** mode states when editing visual components.
-- **Icons**: Always use `lucide-react` SVG icons. Never use raw emojis as UI icons.
 
-### Backend (Rust Core)
-- **Formatting**: Run `cargo fmt` to auto-format Rust files.
-- **Safety**: Ensure there are no compilation warnings. Run `cargo clippy` to check for idiomatic Rust code.
+- **Formatação**: rode o Prettier antes de commitar.
+- **TypeScript**: garanta tipagem estrita. Não use `any` a menos que seja absolutamente necessário (por exemplo, ao lidar com respostas cruas e dinâmicas da API do GramJS).
+- **Estilo**: use classes utilitárias do Tailwind CSS. Evite estilos inline customizados. Respeite os modos **claro** e **escuro** ao editar componentes visuais.
+- **Ícones**: use sempre ícones SVG do `lucide-react`. Nunca use emojis crus como ícones de interface.
+- **Idioma**: todas as strings visíveis ao usuário devem estar em português do Brasil (pt-BR).
+
+### Backend (núcleo em Rust)
+
+- **Formatação**: rode `cargo fmt` para formatar arquivos Rust.
+- **Segurança**: garanta que não existam avisos de compilação. Rode `cargo clippy` para verificar código Rust idiomático.
 
 ---
 
-## 🚀 Local Development Setup
+## Configuração do ambiente local
 
-1. **Clone the repo**:
+1. **Clone o repositório**:
    ```bash
-   git clone https://github.com/your-username/teledrive.git
-   cd teledrive
+   git clone https://github.com/AkumaHalls/KumaDrive.git
+   cd KumaDrive
    ```
-2. **Install dependencies**:
+2. **Instale as dependências**:
    ```bash
    npm install
    ```
-3. **Start the dev server**:
+3. **Inicie o servidor de desenvolvimento**:
    ```bash
    npm run tauri dev
    ```
 
 ---
 
-## 📋 Pull Request Checklist
+## Checklist de Pull Request
 
-Before submitting your PR, verify the following:
-- [ ] The app builds cleanly with zero compile warnings or errors:
+Antes de enviar seu PR, verifique o seguinte:
+
+- [ ] O app compila limpo, com zero avisos ou erros de compilação:
   ```bash
   npm run build
   ```
-- [ ] No temporary debug statements (`console.log`, `println!`) remain in production code pathways.
-- [ ] The code runs correctly under both **light** and **dark** themes.
-- [ ] Clickable controls include proper cursor styles (`cursor-pointer`).
-- [ ] You have updated the `README.md` or other documentation if your pull request introduces config changes or new dependencies.
-- [ ] (If visual) Please attach before/after screenshots to your pull request description.
+- [ ] Nenhuma declaração temporária de depuração (`console.log`, `println!`) permanece no código de produção.
+- [ ] O código funciona corretamente nos temas **claro** e **escuro**.
+- [ ] Controles clicáveis incluem o cursor adequado (`cursor-pointer`).
+- [ ] Você atualizou o `README.md` ou outra documentação se seu pull request introduzir mudanças de configuração ou novas dependências.
+- [ ] (Se for visual) Anexe capturas de tela de antes e depois na descrição do pull request.

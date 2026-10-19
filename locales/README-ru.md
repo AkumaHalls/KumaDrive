@@ -1,23 +1,23 @@
 <div align="center">
 
-<img src="../src-tauri/icons/icon.png" alt="TeleDrive logo" width="100" height="100" />
+<img src="../src-tauri/icons/icon.png" alt="KumaDrive logo" width="100" height="100" />
 
-# TeleDrive
+# KumaDrive
 
 **Безлимитное персональное облачное хранилище на базе вашего приватного Telegram-канала.**  
 Ноль затрат на серверы. Ноль платных подписок. Прямое сквозное шифрование MTProto в Telegram.
 
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
-[![Всего загрузок](https://img.shields.io/sourceforge/dt/teledrive?style=flat-square&logo=sourceforge&logoColor=white)](https://sourceforge.net/projects/teledrive/files/)
-[![Последняя версия](https://img.shields.io/badge/релиз-v0.1.1-2082f7.svg?style=flat-square)](https://sourceforge.net/projects/teledrive/files/v0.1.1/)
+[![Всего загрузок](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
+[![Последняя версия](https://img.shields.io/badge/релиз-v0.2.2-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![Демо на YouTube](https://img.shields.io/badge/YouTube-Видео%20Демо-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![Лицензия: GPL v3](https://img.shields.io/badge/лицензия-GPLv3-gray.svg?style=flat-square)](../LICENSE)
-[![Звезды на GitHub](https://img.shields.io/github/stars/senapati484/teledrive?style=flat-square&logo=github)](https://github.com/senapati484/teledrive/stargazers)
+[![Звезды на GitHub](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-FFC131.svg?style=flat-square&logo=tauri&logoColor=black)](https://tauri.app/)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 
-[**Веб-сайт**](https://teledrive.space) • [**Скачать**](#-скачать) • [**Видео Демо**](#-видео-демонстрация) • [**Сообщить об ошибке**](https://github.com/senapati484/teledrive/issues/new) • [**Предложить функцию**](https://github.com/senapati484/teledrive/issues/new)
+[**Веб-сайт**](https://github.com/AkumaHalls/KumaDrive) • [**Скачать**](#-скачать) • [**Видео Демо**](#-видео-демонстрация) • [**Сообщить об ошибке**](https://github.com/AkumaHalls/KumaDrive/issues/new) • [**Предложить функцию**](https://github.com/AkumaHalls/KumaDrive/issues/new)
 
 </div>
 
@@ -28,7 +28,7 @@
 <div align="center">
 
 <a href="https://youtu.be/4AiMn7HSlFg" target="_blank">
-  <img src="https://img.youtube.com/vi/4AiMn7HSlFg/maxresdefault.jpg" alt="Видео-демонстрация TeleDrive" width="800" style="max-width: 100%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);" />
+  <img src="https://img.youtube.com/vi/4AiMn7HSlFg/maxresdefault.jpg" alt="Видео-демонстрация KumaDrive" width="800" style="max-width: 100%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);" />
 </a>
 
 <br/>
@@ -40,9 +40,9 @@
 
 ---
 
-## 💡 Почему TeleDrive?
+## 💡 Почему KumaDrive?
 
-Telegram предоставляет практически неограниченное облачное хранилище в закрытых каналах, однако не имеет иерархии папок, удобного каталога и привычного рабочего интерфейса настольного диска. **TeleDrive** восполняет этот пробел:
+Telegram предоставляет практически неограниченное облачное хранилище в закрытых каналах, однако не имеет иерархии папок, удобного каталога и привычного рабочего интерфейса настольного диска. **KumaDrive** восполняет этот пробел:
 
 - **Без промежуточных серверов**: Все операции с файлами и сессии MTProto выполняются напрямую с вашего компьютера в дата-центры Telegram.
 - **Виртуальный диск**: Дерево папок, мгновенный поиск, избранное, архив и корзина индексируются в закрепленном зашифрованном каталоге внутри вашего канала.
@@ -53,18 +53,18 @@ Telegram предоставляет практически неограниче�
 
 ## 📥 Скачать
 
-Текущий релиз: **v0.1.1** · Готовые бинарные сборки для всех основных операционных систем:
+Текущий релиз: **v0.2.2** · Готовые бинарные сборки для всех основных операционных систем:
 
 | Операционная система | Формат пакета | Прямая ссылка | Размер |
 |:---|:---|:---|---:|
-| **Windows** | Установщик (`.exe`) | [**teledrive-setup.exe**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive-setup.exe/download) | 5.5 MB |
-| **Windows** | Пакет MSI (`.msi`) | [**teledrive.msi**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.msi/download) | 7.2 MB |
-| **macOS** | Образ диска Universal (`.dmg`) | [**teledrive.dmg**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.dmg/download) | 15.8 MB |
-| **Linux** | Universal AppImage (`.AppImage`) | [**teledrive.AppImage**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.AppImage/download) | 86.1 MB |
-| **Linux** | Debian / Ubuntu (`.deb`) | [**teledrive.deb**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.deb/download) | 8.4 MB |
-| **Linux** | Fedora / RHEL (`.rpm`) | [**teledrive.rpm**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.rpm/download) | 8.0 MB |
+| **Windows** | Установщик (`.exe`) | [**KumaDrive-setup.exe**](https://github.com/AkumaHalls/KumaDrive/releases) | 5.5 MB |
+| **Windows** | Пакет MSI (`.msi`) | [**KumaDrive.msi**](https://github.com/AkumaHalls/KumaDrive/releases) | 7.2 MB |
+| **macOS** | Образ диска Universal (`.dmg`) | [**KumaDrive.dmg**](https://github.com/AkumaHalls/KumaDrive/releases) | 15.8 MB |
+| **Linux** | Universal AppImage (`.AppImage`) | [**KumaDrive.AppImage**](https://github.com/AkumaHalls/KumaDrive/releases) | 86.1 MB |
+| **Linux** | Debian / Ubuntu (`.deb`) | [**KumaDrive.deb**](https://github.com/AkumaHalls/KumaDrive/releases) | 8.4 MB |
+| **Linux** | Fedora / RHEL (`.rpm`) | [**KumaDrive.rpm**](https://github.com/AkumaHalls/KumaDrive/releases) | 8.0 MB |
 
-> 🌐 Полный список зеркал и контрольные суммы доступны на [**SourceForge**](https://sourceforge.net/projects/teledrive/files/) или на [**teledrive.space**](https://teledrive.space).
+> 🌐 Полный список зеркал и контрольные суммы доступны на [**GitHub**](https://github.com/AkumaHalls/KumaDrive/releases/) или на [**github.com/AkumaHalls/KumaDrive**](https://github.com/AkumaHalls/KumaDrive).
 
 ---
 
@@ -110,8 +110,8 @@ Telegram предоставляет практически неограниче�
 ### 1. Получение ключей Telegram API
 
 1. Авторизуйтесь на сайте [my.telegram.org](https://my.telegram.org) по номеру телефона.
-2. Перейдите в раздел **API development tools** и создайте приложение (например, `TeleDrive`).
-3. Скопируйте `api_id` и `api_hash` и укажите их при первом запуске TeleDrive.
+2. Перейдите в раздел **API development tools** и создайте приложение (например, `KumaDrive`).
+3. Скопируйте `api_id` и `api_hash` и укажите их при первом запуске KumaDrive.
 
 ### 2. Сборка и запуск из исходников
 
@@ -121,8 +121,8 @@ Telegram предоставляет практически неограниче�
 
 ```bash
 # Клонировать репозиторий
-git clone https://github.com/senapati484/teledrive.git
-cd teledrive
+git clone https://github.com/AkumaHalls/KumaDrive.git
+cd KumaDrive
 
 # Установить зависимости
 npm install
@@ -167,16 +167,16 @@ npm run tauri build
 
 ## 📜 Лицензия
 
-TeleDrive распространяется под свободной лицензией [GNU GPL-3.0 License](../LICENSE).
+KumaDrive распространяется под свободной лицензией [GNU GPL-3.0 License](../LICENSE).
 
-*Отказ от ответственности: TeleDrive является независимым проектом с открытым исходным кодом и не связан, не спонсируется и не поддерживается компанией Telegram FZ-LLC. Хранение файлов регулируется Условиями использования и политикой Telegram.*
+*Отказ от ответственности: KumaDrive является независимым проектом с открытым исходным кодом и не связан, не спонсируется и не поддерживается компанией Telegram FZ-LLC. Хранение файлов регулируется Условиями использования и политикой Telegram.*
 
 ---
 
 <div align="center">
 
-Создано с ❤️ автором **[Senapati484](https://github.com/senapati484)**
+Создано с ❤️ автором **[AkumaHalls](https://github.com/AkumaHalls)**
 
-Если вам понравился TeleDrive, поставьте звезду ⭐ на [GitHub](https://github.com/senapati484/teledrive)!
+Если вам понравился KumaDrive, поставьте звезду ⭐ на [GitHub](https://github.com/AkumaHalls/KumaDrive)!
 
 </div>

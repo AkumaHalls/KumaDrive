@@ -14,16 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch SourceForge stats (2026-06-21 -> today)
+      - name: Count GitHub release downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          START="2026-06-21"
-          END="$(date -u +%F)"
-          curl -fsSL \
-            "https://sourceforge.net/projects/teledrive/files/stats/json?start_date=${START}&end_date=${END}&os_by_country=false" \
-            -o /tmp/stats.json
-
-          TOTAL=$(jq '.total // ([.downloads[][1]] | add) // 0' /tmp/stats.json)
-          echo "Total downloads ${START}..${END}: ${TOTAL}"
+          TOTAL=$(gh api "repos/${{ github.repository }}/releases" --paginate \
+            --jq '[.[].assets[].download_count] | add // 0')
+          echo "Total release downloads: ${TOTAL}"
 
           mkdir -p .github/stats
           jq -n --argjson t "$TOTAL" \

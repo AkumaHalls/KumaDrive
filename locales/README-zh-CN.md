@@ -1,23 +1,23 @@
 <div align="center">
 
-<img src="../src-tauri/icons/icon.png" alt="TeleDrive logo" width="100" height="100" />
+<img src="../src-tauri/icons/icon.png" alt="KumaDrive logo" width="100" height="100" />
 
-# TeleDrive
+# KumaDrive
 
 **基于私人 Telegram 频道打造的无限个人云存储桌面客户端。**  
 零服务器租金 · 零订阅费用 · 直接通过 MTProto 端到端加密直连 Telegram。
 
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
-[![总下载量](https://img.shields.io/sourceforge/dt/teledrive?style=flat-square&logo=sourceforge&logoColor=white)](https://sourceforge.net/projects/teledrive/files/)
-[![最新版本](https://img.shields.io/badge/版本-v0.1.1-2082f7.svg?style=flat-square)](https://sourceforge.net/projects/teledrive/files/v0.1.1/)
+[![总下载量](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
+[![最新版本](https://img.shields.io/badge/版本-v0.2.2-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![YouTube 演示视频](https://img.shields.io/badge/YouTube-演示视频-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![开源协议: GPL v3](https://img.shields.io/badge/开源协议-GPLv3-gray.svg?style=flat-square)](../LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/senapati484/teledrive?style=flat-square&logo=github)](https://github.com/senapati484/teledrive/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-FFC131.svg?style=flat-square&logo=tauri&logoColor=black)](https://tauri.app/)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 
-[**官方网站**](https://teledrive.space) • [**安装包下载**](#-下载) • [**视频演示**](#-视频演示与讲解) • [**提交问题**](https://github.com/senapati484/teledrive/issues/new) • [**建议新功能**](https://github.com/senapati484/teledrive/issues/new)
+[**官方网站**](https://github.com/AkumaHalls/KumaDrive) • [**安装包下载**](#-下载) • [**视频演示**](#-视频演示与讲解) • [**提交问题**](https://github.com/AkumaHalls/KumaDrive/issues/new) • [**建议新功能**](https://github.com/AkumaHalls/KumaDrive/issues/new)
 
 </div>
 
@@ -28,7 +28,7 @@
 <div align="center">
 
 <a href="https://youtu.be/4AiMn7HSlFg" target="_blank">
-  <img src="https://img.youtube.com/vi/4AiMn7HSlFg/maxresdefault.jpg" alt="TeleDrive 演示视频" width="800" style="max-width: 100%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);" />
+  <img src="https://img.youtube.com/vi/4AiMn7HSlFg/maxresdefault.jpg" alt="KumaDrive 演示视频" width="800" style="max-width: 100%; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2);" />
 </a>
 
 <br/>
@@ -40,9 +40,9 @@
 
 ---
 
-## 💡 为什么选择 TeleDrive？
+## 💡 为什么选择 KumaDrive？
 
-Telegram 在私人频道中提供了几乎无限的免费云存储空间，但缺少文件夹层级、虚拟文件索引以及桌面网盘式的操作体验。**TeleDrive** 完美弥补了这一空缺：
+Telegram 在私人频道中提供了几乎无限的免费云存储空间，但缺少文件夹层级、虚拟文件索引以及桌面网盘式的操作体验。**KumaDrive** 完美弥补了这一空缺：
 
 - **零中转服务器**：所有文件上传下载与 MTProto 网络交互均在本地设备与 Telegram 数据中心之间直连完成。
 - **虚拟云盘系统**：支持多层级嵌套文件夹、全局秒搜、星标收藏、归档与回收站，并在私人频道中维护置顶加密目录索引。
@@ -53,18 +53,18 @@ Telegram 在私人频道中提供了几乎无限的免费云存储空间，但�
 
 ## 📥 下载
 
-当前最新版本：**v0.1.1** · 全平台预编译原生安装包：
+当前最新版本：**v0.2.2** · 全平台预编译原生安装包：
 
 | 操作系统 | 安装包格式 | 直接下载链接 | 大小 |
 |:---|:---|:---|---:|
-| **Windows** | 安装程序 (`.exe`) | [**teledrive-setup.exe**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive-setup.exe/download) | 5.5 MB |
-| **Windows** | MSI 安装包 (`.msi`) | [**teledrive.msi**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.msi/download) | 7.2 MB |
-| **macOS** | 通用镜像 (`.dmg`) | [**teledrive.dmg**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.dmg/download) | 15.8 MB |
-| **Linux** | 通用 AppImage (`.AppImage`) | [**teledrive.AppImage**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.AppImage/download) | 86.1 MB |
-| **Linux** | Debian / Ubuntu (`.deb`) | [**teledrive.deb**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.deb/download) | 8.4 MB |
-| **Linux** | Fedora / RHEL (`.rpm`) | [**teledrive.rpm**](https://sourceforge.net/projects/teledrive/files/v0.1.1/teledrive.rpm/download) | 8.0 MB |
+| **Windows** | 安装程序 (`.exe`) | [**KumaDrive-setup.exe**](https://github.com/AkumaHalls/KumaDrive/releases) | 5.5 MB |
+| **Windows** | MSI 安装包 (`.msi`) | [**KumaDrive.msi**](https://github.com/AkumaHalls/KumaDrive/releases) | 7.2 MB |
+| **macOS** | 通用镜像 (`.dmg`) | [**KumaDrive.dmg**](https://github.com/AkumaHalls/KumaDrive/releases) | 15.8 MB |
+| **Linux** | 通用 AppImage (`.AppImage`) | [**KumaDrive.AppImage**](https://github.com/AkumaHalls/KumaDrive/releases) | 86.1 MB |
+| **Linux** | Debian / Ubuntu (`.deb`) | [**KumaDrive.deb**](https://github.com/AkumaHalls/KumaDrive/releases) | 8.4 MB |
+| **Linux** | Fedora / RHEL (`.rpm`) | [**KumaDrive.rpm**](https://github.com/AkumaHalls/KumaDrive/releases) | 8.0 MB |
 
-> 🌐 所有软件包、镜像下载地址及校验码均可在 [**SourceForge**](https://sourceforge.net/projects/teledrive/files/) 或 [**teledrive.space**](https://teledrive.space) 获取。
+> 🌐 所有软件包、镜像下载地址及校验码均可在 [**GitHub**](https://github.com/AkumaHalls/KumaDrive/releases/) 或 [**github.com/AkumaHalls/KumaDrive**](https://github.com/AkumaHalls/KumaDrive) 获取。
 
 ---
 
@@ -110,8 +110,8 @@ Telegram 在私人频道中提供了几乎无限的免费云存储空间，但�
 ### 1. 获取 Telegram API 凭据
 
 1. 使用手机号登录 [my.telegram.org](https://my.telegram.org)。
-2. 进入 **API development tools**，新建一个应用（例如名称填写 `TeleDrive`）。
-3. 复制生成的 `api_id` 和 `api_hash`，在首次启动 TeleDrive 时填入即可。
+2. 进入 **API development tools**，新建一个应用（例如名称填写 `KumaDrive`）。
+3. 复制生成的 `api_id` 和 `api_hash`，在首次启动 KumaDrive 时填入即可。
 
 ### 2. 源码本地运行
 
@@ -121,8 +121,8 @@ Telegram 在私人频道中提供了几乎无限的免费云存储空间，但�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/senapati484/teledrive.git
-cd teledrive
+git clone https://github.com/AkumaHalls/KumaDrive.git
+cd KumaDrive
 
 # 安装依赖
 npm install
@@ -167,16 +167,16 @@ npm run tauri build
 
 ## 📜 开源协议
 
-TeleDrive 遵循 [GNU GPL-3.0 License](../LICENSE) 开源协议。
+KumaDrive 遵循 [GNU GPL-3.0 License](../LICENSE) 开源协议。
 
-*免责声明：TeleDrive 是一个独立的开源项目，未受 Telegram FZ-LLC 赞助、认可或存在附属关系。存储大容量文件需遵守 Telegram 服务条款和 API 公平使用政策。*
+*免责声明：KumaDrive 是一个独立的开源项目，未受 Telegram FZ-LLC 赞助、认可或存在附属关系。存储大容量文件需遵守 Telegram 服务条款和 API 公平使用政策。*
 
 ---
 
 <div align="center">
 
-Created with ❤️ by **[Senapati484](https://github.com/senapati484)**
+Created with ❤️ by **[AkumaHalls](https://github.com/AkumaHalls)**
 
-如果 TeleDrive 对您有帮助，欢迎在 [GitHub](https://github.com/senapati484/teledrive) 上点亮一颗 ⭐！
+如果 KumaDrive 对您有帮助，欢迎在 [GitHub](https://github.com/AkumaHalls/KumaDrive) 上点亮一颗 ⭐！
 
 </div>

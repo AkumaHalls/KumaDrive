@@ -7,7 +7,7 @@ const distDir = path.join(rootDir, 'release-dist');
 const isWindows = process.platform === 'win32';
 
 console.log('======================================================');
-console.log('   TeleDrive Windows Executable & Installer Builder   ');
+console.log('   KumaDrive Windows Executable & Installer Builder   ');
 console.log('======================================================\n');
 
 if (!fs.existsSync(distDir)) {
@@ -26,16 +26,16 @@ if (isWindows) {
   execSync('npx tauri build --bundles nsis', { cwd: rootDir, stdio: 'inherit' });
 } else {
   // On macOS / Linux:
-  console.log(`\nℹ️  Detected current OS: ${process.platform}`);
-  console.log('ℹ️  Attempting Windows cross-compilation (x86_64-pc-windows-msvc)...');
-  
+  console.log(`\nINFO: Detected current OS: ${process.platform}`);
+  console.log('INFO: Attempting Windows cross-compilation (x86_64-pc-windows-msvc)...');
+
   try {
     execSync('npx tauri build --target x86_64-pc-windows-msvc --bundles nsis', { cwd: rootDir, stdio: 'inherit' });
   } catch (err) {
     console.log('\n------------------------------------------------------');
-    console.log('⚠️  Notice on Cross-Compiling Windows .exe from Mac/Linux:');
+    console.log('NOTICE: Cross-compiling a Windows .exe from Mac/Linux');
     console.log('Tauri and Rust native Windows linking require the Windows MSVC SDK or MinGW.');
-    console.log('\nRecommended options to get your teledrive-setup.exe:');
+    console.log('\nRecommended options to get your kumadrive-setup.exe:');
     console.log('1. Run `npm run build:exe` directly on any Windows PC.');
     console.log('2. Trigger the GitHub Actions release workflow (.github/workflows/release.yml),');
     console.log('   which automatically builds the Windows .exe on GitHub\'s Windows servers!');
@@ -69,26 +69,26 @@ for (const dir of searchRoots) {
     if (!fs.statSync(fullPath).isFile()) continue;
 
     if (file.toLowerCase().endsWith('-setup.exe') || (file.toLowerCase().endsWith('.exe') && file.toLowerCase().includes('setup'))) {
-      const targetPath = path.join(distDir, 'teledrive-setup.exe');
+      const targetPath = path.join(distDir, 'kumadrive-setup.exe');
       fs.copyFileSync(fullPath, targetPath);
       const sizeMb = (fs.statSync(targetPath).size / (1024 * 1024)).toFixed(2);
-      console.log(`✅ Copied NSIS installer -> ${targetPath} (${sizeMb} MB)`);
+      console.log(`OK: Copied NSIS installer -> ${targetPath} (${sizeMb} MB)`);
       installerCopied = true;
-    } else if (file.toLowerCase() === 'teledrive.exe' && !file.toLowerCase().includes('setup')) {
-      const targetPath = path.join(distDir, 'teledrive.exe');
+    } else if (file.toLowerCase() === 'kumadrive.exe' && !file.toLowerCase().includes('setup')) {
+      const targetPath = path.join(distDir, 'kumadrive.exe');
       fs.copyFileSync(fullPath, targetPath);
       const sizeMb = (fs.statSync(targetPath).size / (1024 * 1024)).toFixed(2);
-      console.log(`✅ Copied standalone binary -> ${targetPath} (${sizeMb} MB)`);
+      console.log(`OK: Copied standalone binary -> ${targetPath} (${sizeMb} MB)`);
       standaloneCopied = true;
     }
   }
 }
 
 if (!installerCopied && !standaloneCopied) {
-  console.log('⚠️ Could not find generated .exe in standard bundle directories.');
+  console.log('WARN: Could not find generated .exe in standard bundle directories.');
 } else {
   console.log('\n======================================================');
-  console.log('🎉 Windows build packaging complete!');
-  console.log('📁 Check output files in `release-dist/`');
+  console.log('Windows build packaging complete!');
+  console.log('Check output files in `release-dist/`');
   console.log('======================================================');
 }
