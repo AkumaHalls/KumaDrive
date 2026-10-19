@@ -1,0 +1,62 @@
+[package]
+name = "kumadrive"
+version = "0.1.0"
+description = "Armazenamento em nuvem ilimitado, gratuito e privado usando o Telegram"
+authors = ["KumaDrive Team <team@kumadrive.app>"]
+license = "GPL-3.0"
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+name = "kumadrive_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "KumaDrive"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-process = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-stronghold = "2"
+tokio = { version = "1", features = ["full", "rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+argon2 = { version = "0.5", features = ["std"] }
+zeroize = "1"
+walkdir = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde", "fast-rng"] }
+hex = "0.4"
+base64 = "0.21"
+percent-encoding = "2"
+url = "2"
+mime = "0.3"
+mime_guess = "2"
+sha2 = "0.10"
+blake3 = "1"
+tauri-plugin-updater = "2"
+
+[features]
+default = []
+custom-protocol = []
+
+[profile.dev]
+debug = true
+opt-level = 0
+
+[profile.release]
+debug = false
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,54 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment & local files
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.claude/
+vault_state.log
+buildfiles/
+*.dmg
+distribution/
+*.exe
+*.msi
+*.AppImage
+*.deb
+*.rpm
+release-dist/*
+!release-dist/build_dmg.sh
+
+# Tauri updater — chaves de assinatura NUNCA devem ir para o repositorio.
+# A chave publica (.pub) ja esta em tauri.conf.json; a privada fica em
+# GitHub Actions > Settings > Secrets.
+*.key
+*.key.pub
+*.sig
+
+# Artefatos locais de tooling/skills
+.opencode/
+design-system/
+*.local.ps1
