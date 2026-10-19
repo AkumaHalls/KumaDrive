@@ -6,6 +6,7 @@ import {
   VAULT_KEY_API_HASH,
 } from "../secure/vault";
 import { DEFAULT_API_ID, DEFAULT_API_HASH } from "./config";
+import { isAuthError, isSoftAuthError } from "./authErrors";
 import { invoke } from "@tauri-apps/api/core";
 
 /**
@@ -89,29 +90,16 @@ export async function restoreSession(): Promise<boolean> {
   } catch (error: any) {
     const errorStr = `RESTORE_EXC: ${error?.message ?? "no_msg"}\nStack: ${error?.stack ?? "no_stack"}`;
     await invoke("log_vault_state", { state: errorStr }).catch(() => {});
-    
-    // Check if this error is due to a network connection failure (e.g. offline)
-    const errorMsg = (error?.message || "").toLowerCase();
-    const isNetworkError =
-      errorMsg.includes("timeout") ||
-      errorMsg.includes("network") ||
-      errorMsg.includes("fetch") ||
-      errorMsg.includes("connect") ||
-      errorMsg.includes("disconnect") ||
-      errorMsg.includes("socket") ||
-      errorMsg.includes("dns") ||
-      errorMsg.includes("resolve") ||
-      errorMsg.includes("etimedout") ||
-      errorMsg.includes("enotfound") ||
-      errorMsg.includes("econnrefused") ||
-      errorMsg.includes("handshake");
 
-    if (!isNetworkError) {
-      console.warn("restoreSession: Authentication failure or invalid credentials, clearing session...", error);
+    // Só apaga a sessão quando o Telegram realmente indicou que ela não vale
+    // mais. Antes, qualquer erro que não "parecesse rede" (500 interno,
+    // RPC_CALL_FAIL, FLOOD_WAIT) deslogava o usuário no boot.
+    if (isAuthError(error) || isSoftAuthError(error)) {
+      console.warn("restoreSession: sessão inválida ou expirada, limpando...", error);
       await invoke("clear_session").catch(() => {});
       useAuthStore.getState().logout();
     } else {
-      console.warn("restoreSession: Network connection failure during restoration (offline launch?), keeping session active:", error);
+      console.warn("restoreSession: falha transitória ao restaurar a sessão (mantendo sessão ativa):", error);
     }
     return false;
   }

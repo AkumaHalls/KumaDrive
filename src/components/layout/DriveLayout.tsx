@@ -44,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { getModKey } from "@/lib/os";
+import { toast } from "sonner";
 
 const DND_PAYLOAD_MIME = "application/x-kumadrive-item-ids";
 
@@ -263,8 +264,11 @@ export default function DriveLayout() {
     const handleRefreshFiles = async () => {
       try {
         await bootstrapKumaDrive(undefined, phoneNumber ?? "");
-      } catch (err) {
+      } catch (err: any) {
         console.error("Refresh failed:", err);
+        toast.error("Não foi possível atualizar os arquivos", {
+          description: err?.message ?? "Verifique sua conexão e tente novamente.",
+        });
       }
     };
 
@@ -337,8 +341,11 @@ export default function DriveLayout() {
       setPullProgress(100);
       try {
         await bootstrapKumaDrive(undefined, phoneNumber ?? "");
-      } catch (err) {
+      } catch (err: any) {
         console.error("Failed to refresh:", err);
+        toast.error("Não foi possível atualizar os arquivos", {
+          description: err?.message ?? "Verifique sua conexão e tente novamente.",
+        });
       } finally {
         setIsRefreshing(false);
         setPullProgress(0);

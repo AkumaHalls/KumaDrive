@@ -85,8 +85,32 @@ fn get_vault_state_log_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(data_dir.join("vault_state.log"))
 }
 
+/// Serializa todas as operações de leitura-modificação-escrita sobre os
+/// arquivos de vault/sessão. Sem isso, dois `save_vault_value` concorrentes
+/// leem o mesmo estado antigo e a última escrita apaga a chave da outra.
+fn vault_io_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+/// Escreve `contents` em `path` de forma atômica (arquivo temporário + rename).
+/// Uma queda de energia ou disco cheio no meio da escrita deixa o arquivo
+/// anterior intacto, em vez de um JSON truncado que descartaria silenciosamente
+/// todas as credenciais armazenadas.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents)
+        .map_err(|e| KumaDriveError::WriteFile(format!("write({}) falhou: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        KumaDriveError::WriteFile(format!("rename({} -> {}) falhou: {e}", tmp.display(), path.display()))
+    })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn save_vault_value(app: AppHandle, key: String, value: String) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let vault_path = get_vault_path(&app)?;
     let mut data = if vault_path.exists() {
         let contents = std::fs::read_to_string(&vault_path).map_err(|e| KumaDriveError::ReadFile(e.to_string()))?;
@@ -95,7 +119,7 @@ async fn save_vault_value(app: AppHandle, key: String, value: String) -> Result<
         serde_json::Map::new()
     };
     data.insert(key, serde_json::Value::String(value));
-    std::fs::write(&vault_path, serde_json::to_string(&data).unwrap()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&vault_path, &serde_json::to_string(&data).unwrap())?;
     Ok(())
 }
 
@@ -115,17 +139,19 @@ async fn load_vault_value(app: AppHandle, key: String) -> Result<Option<String>>
 
 #[tauri::command]
 async fn delete_vault_value(app: AppHandle, key: String) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let vault_path = get_vault_path(&app)?;
     if !vault_path.exists() { return Ok(()); }
     let contents = std::fs::read_to_string(&vault_path).map_err(|e| KumaDriveError::ReadFile(e.to_string()))?;
     let mut data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&contents).map_err(|e| KumaDriveError::JsonDeserialize(e.to_string()))?;
     data.remove(&key);
-    std::fs::write(&vault_path, serde_json::to_string(&data).unwrap()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&vault_path, &serde_json::to_string(&data).unwrap())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn quarantine_vault_value(app: AppHandle, key: String, backup_key: String) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let vault_path = get_vault_path(&app)?;
     if !vault_path.exists() { return Ok(()); }
     let contents = std::fs::read_to_string(&vault_path).map_err(|e| KumaDriveError::ReadFile(e.to_string()))?;
@@ -133,15 +159,16 @@ async fn quarantine_vault_value(app: AppHandle, key: String, backup_key: String)
     if let Some(value) = data.remove(&key) {
         data.insert(backup_key, value);
     }
-    std::fs::write(&vault_path, serde_json::to_string(&data).unwrap()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&vault_path, &serde_json::to_string(&data).unwrap())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn save_session(app: AppHandle, session: String, phone: String) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let session_path = get_session_path(&app)?;
     let json = serde_json::json!({ "session": session, "phone": phone });
-    std::fs::write(&session_path, json.to_string()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&session_path, &json.to_string())?;
     Ok(())
 }
 
@@ -163,12 +190,13 @@ async fn clear_session(app: AppHandle) -> Result<()> {
 
 #[tauri::command]
 async fn clear_session_only(app: AppHandle) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let session_path = get_session_path(&app)?;
     if !session_path.exists() { return Ok(()); }
     let contents = std::fs::read_to_string(&session_path).map_err(|e| KumaDriveError::ReadFile(e.to_string()))?;
     let mut parsed: serde_json::Value = serde_json::from_str(&contents).map_err(|e| KumaDriveError::JsonDeserialize(e.to_string()))?;
     if let Some(obj) = parsed.as_object_mut() { obj.insert("session".to_string(), serde_json::Value::Null); }
-    std::fs::write(&session_path, parsed.to_string()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&session_path, &parsed.to_string())?;
     Ok(())
 }
 
@@ -209,8 +237,9 @@ async fn stop_backup_scheduler_internal(_app: &AppHandle) {
 
 #[tauri::command]
 async fn save_backup_config(app: AppHandle, config: BackupConfig) -> Result<()> {
+    let _guard = vault_io_lock().lock().await;
     let config_path = get_backup_config_path(&app)?;
-    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).map_err(|e| KumaDriveError::WriteFile(e.to_string()))?;
+    write_atomic(&config_path, &serde_json::to_string(&config).unwrap())?;
     Ok(())
 }
 
@@ -305,26 +334,15 @@ async fn write_file_chunk(path: String, data: Vec<u8>, append: bool) -> Result<(
 }
 
 #[tauri::command]
-fn open_file_in_system_viewer(path: String) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd").args(["/C", "start", "", &path]).spawn().map_err(|e| KumaDriveError::InvalidOperation(format!("Failed to open file on Windows: {e}")))?;
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(&path).spawn().map_err(|e| KumaDriveError::InvalidOperation(format!("Failed to open file on macOS: {e}")))?;
-        Ok(())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(&path).spawn().map_err(|e| KumaDriveError::InvalidOperation(format!("Failed to open file on Linux: {e}")))?;
-        Ok(())
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        Err(KumaDriveError::InvalidOperation("Sistema operacional não suportado para abrir arquivos".to_string()))
-    }
+fn open_file_in_system_viewer(app: AppHandle, path: String) -> Result<()> {
+    // Abre via plugin opener (chamada direta à API do sistema, sem shell).
+    // A versão anterior no Windows fazia `cmd /C start "" <path>`, o que
+    // permitia injeção de comandos por nomes de arquivo contendo `&`/`|`/`^`
+    // vindos do Telegram.
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| KumaDriveError::InvalidOperation(format!("Falha ao abrir o arquivo no visualizador do sistema: {e}")))
 }
 
 fn log_vault_state_internal(app: &AppHandle, state: String) {

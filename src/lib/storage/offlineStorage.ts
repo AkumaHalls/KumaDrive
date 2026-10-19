@@ -1,8 +1,17 @@
 import { appLocalDataDir, join } from "@tauri-apps/api/path";
-import { readFile, remove, mkdir, exists } from "@tauri-apps/plugin-fs";
+import { readFile, remove, mkdir, exists, rename } from "@tauri-apps/plugin-fs";
 import { saveBinaryFile } from "./safeFileWriter";
 import { downloadFileToBuffer } from "../telegram/downloader";
 import { TeleFile } from "../types";
+
+/**
+ * Normaliza o `fileId` para um componente de nome de arquivo seguro.
+ * O `fileId` vem de metadados (índice/Telegram); sem isso, um valor com
+ * `../` permitiria escapar do diretório de cache offline.
+ */
+function sanitizeFileId(fileId: string): string {
+  return fileId.replace(/[^A-Za-z0-9._-]/g, "_");
+}
 
 /**
  * Returns the resolved local filesystem path for a cached offline file.
@@ -24,11 +33,15 @@ export async function getOfflineFilePath(fileId: string): Promise<string> {
     } catch (_) {}
   }
 
-  return await join(offlineDir, `offline_${fileId}`);
+  return await join(offlineDir, `offline_${sanitizeFileId(fileId)}`);
 }
 
 /**
  * Saves a Telegram file's contents to local cache for offline access.
+ *
+ * Escreve num arquivo `.part` e só então renomeia para o destino final. Sem
+ * isso, uma escrita interrompida (queda, disco cheio) deixava um
+ * `offline_<id>` parcial que `isCachedOffline` passava a tratar como válido.
  */
 export async function cacheFileOffline(
   channelId: string,
@@ -38,7 +51,14 @@ export async function cacheFileOffline(
 ): Promise<void> {
   const buffer = await downloadFileToBuffer(channelId, messageId, onProgress);
   const localPath = await getOfflineFilePath(fileId);
-  await saveBinaryFile(localPath, buffer);
+  const tmpPath = `${localPath}.part`;
+  await saveBinaryFile(tmpPath, buffer);
+  try {
+    await rename(tmpPath, localPath);
+  } catch (err) {
+    await remove(tmpPath).catch(() => {});
+    throw err;
+  }
 }
 
 /**

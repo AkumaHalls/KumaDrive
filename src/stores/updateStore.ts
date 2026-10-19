@@ -128,7 +128,21 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   install: async () => {
     if (get().installing) return;
-    const update = takePendingUpdate();
+    let update = takePendingUpdate();
+    if (!update) {
+      // O handle pode ter sido descartado (ex.: uma tentativa anterior falhou).
+      // Reconsulta para obter um handle novo em vez de mostrar "não está mais
+      // disponível" enquanto o diálogo ainda exibe uma versão disponível.
+      try {
+        const fresh = await check();
+        if (fresh) {
+          getPendingUpdate(fresh);
+          update = fresh;
+        }
+      } catch {
+        // Sem rede — cai na mensagem de erro abaixo.
+      }
+    }
     if (!update) {
       toast.error("A atualização não está mais disponível.", {
         description: "Verifique as atualizações novamente.",

@@ -448,6 +448,9 @@ export default function AuthPage() {
       await invoke("save_session", { session: sessionString, phone: phone.trim() });
     } catch (saveErr) {
       console.error("save_session (Rust) failed:", saveErr);
+      toast.warning("Não foi possível salvar a sessão neste dispositivo.", {
+        description: "Talvez seja necessário entrar novamente ao reabrir o KumaDrive.",
+      });
     }
 
     try {

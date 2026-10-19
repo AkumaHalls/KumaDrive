@@ -39,10 +39,10 @@ export async function downloadFileFromTelegram(
   fileName: string,
   onProgress?: (progress: number) => void
 ): Promise<void> {
-  const client = getClient();
   const toastId = `download-${messageId}-${Date.now()}`;
   
   try {
+    const client = getClient();
     if (!client.connected) {
       console.log("[downloader] Client disconnected, reconnecting...");
       await client.connect();
@@ -110,9 +110,9 @@ export async function downloadFileToBuffer(
   messageId: number,
   onProgress?: (progress: number) => void
 ): Promise<Uint8Array> {
-  const client = getClient();
-  
   try {
+    const client = getClient();
+    
     if (!client.connected) {
       console.log("[downloader] Client disconnected, reconnecting...");
       await client.connect();
