@@ -61,7 +61,7 @@ import {
   isAuthError,
   isSoftAuthError,
 } from "../telegram/authErrors";
-import { isHardError } from "../telegram/rateLimit";
+import { isRunAbortError } from "../telegram/rateLimit";
 import { reconstructMissingFolders } from "../storage/metadataStore";
 import type { TeleFile } from "../types";
 
@@ -190,6 +190,11 @@ export interface BackupRunResult {
   filesFailed: number;
   /** Source folders that didn't exist on disk anymore. */
   missingFolders: string[];
+  /**
+   * Arquivos de 0 bytes encontrados e ignorados (a API do Telegram não
+   * armazena arquivos vazios — ver walker.ts / WalkResult.emptySkipped).
+   */
+  emptySkipped: number;
   /** Audit-row id, if backend POST succeeded. */
   auditJobId: string | null;
   /** Aggregate status. */
@@ -283,6 +288,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
     filesSkipped: 0,
     filesFailed: 0,
     missingFolders: [],
+    emptySkipped: 0,
     auditJobId: null,
     status: "failed",
     error: null,
@@ -374,6 +380,19 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   // `status: "success"` sem ter lido um único arquivo. O usuário via
   // "backup concluído" e não tinha como saber que nada foi espelhado.
   const missingFolders: string[] = [...walk.unreadableRoots];
+
+  // Arquivos de 0 bytes que o walker pulou (ver WalkResult.emptySkipped).
+  // Informamos no console e no resultado; NÃO contam como falha — o backup
+  // prossegue normalmente.
+  const emptySkippedCount = walk.emptySkipped.length;
+  if (emptySkippedCount > 0) {
+    console.warn(
+      `[backup.runner] ${emptySkippedCount} arquivo(s) de 0 byte ignorado(s); ` +
+        `a API do Telegram não armazena arquivos vazios:`,
+      walk.emptySkipped.slice(0, 20),
+      emptySkippedCount > 20 ? `… (+${emptySkippedCount - 20})` : "",
+    );
+  }
 
   // Se TODAS as pastas configuradas falharam, isto é um erro de
   // configuração, não um no-op — não faz sentido reportar sucesso.
@@ -738,7 +757,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       // "session expired" message instead of 218 confusing failures and
       // an indefinite wait. Without this short-circuit, a revoked session
       // turns into a multi-minute loop of identical errors.
-      if (isHardError(err)) {
+      if (isRunAbortError(err)) {
         // Account for the rest of the queue so filesFailed reflects what
         // actually happened (and the user knows the magnitude of the loss).
         filesFailed += diff.toUpload.length - i - 1;
@@ -822,6 +841,7 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
     filesSkipped: diff.unchanged.length,
     filesFailed,
     missingFolders,
+    emptySkipped: emptySkippedCount,
     auditJobId,
     status,
     error: firstError,

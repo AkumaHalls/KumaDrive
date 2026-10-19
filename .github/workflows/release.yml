@@ -54,7 +54,7 @@ jobs:
             - **MSI**: `*.msi`
 
             O app verifica atualizações em Configurações → Sobre → Verificar atualizações.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
 
       - name: Resume
@@ -65,6 +65,6 @@ jobs:
           echo "Artefatos (incluindo latest.json e .sig) foram anexados automaticamente"
           echo "pela tauri-action. O arquivo latest.json e o que o app consulta."
           echo ""
-          echo "1. Va em https://github.com/${{ github.repository }}/releases"
-          echo "2. Edite o rascunho e publique (draft: true)"
-          echo "3. Teste: /verificar-atualizacoes no app"
+          echo "Release publicada automaticamente (releaseDraft: false)."
+          echo ""
+          echo "Teste no app: Configurações -> Sobre -> Verificar atualizações."

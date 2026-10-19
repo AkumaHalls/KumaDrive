@@ -7,7 +7,7 @@
 Desktop multiplataforma · Windows · macOS · Linux
 
 [![Licença](https://img.shields.io/badge/Licença-GPL--3.0-orange?style=flat-square)](LICENSE)
-[![Versão](https://img.shields.io/badge/versão-0.2.0-orange?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases)
+[![Versão](https://img.shields.io/badge/versão-0.2.3-orange?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases)
 [![Plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#download)
 [![Atualizações](https://img.shields.io/badge/updates-automáticas-green?style=flat-square)](#atualizações-automáticas)
 

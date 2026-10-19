@@ -320,6 +320,15 @@ async function onTick(): Promise<void> {
         duration: 12000,
       });
     }
+
+    if (result.emptySkipped > 0) {
+      toast.info("Arquivos vazios ignorados no backup agendado", {
+        description:
+          `${result.emptySkipped} arquivo(s) de 0 byte foram ignorados — ` +
+          `a API do Telegram não armazena arquivos vazios.`,
+        duration: 8000,
+      });
+    }
   } catch (err) {
     console.warn("[backup.scheduler] onTick failed:", err);
     finish({

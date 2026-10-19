@@ -101,6 +101,18 @@ export interface WalkResult {
   /** Raízes configuradas que falharam ao ser lidas (inexistente, sem permissão, etc.). */
   unreadableRoots: string[];
   /**
+   * Arquivos de 0 bytes encontrados e deliberadamente IGNORADOS.
+   *
+   * A API do Telegram não permite armazenar um arquivo vazio por este caminho:
+   * `inputFile.parts` precisa ser >= 1 (`FILE_PARTS_INVALID` caso contrário) e
+   * uma parte vazia é rejeitada com `FILE_PART_EMPTY`. Como um arquivo de 0
+   * bytes produz `parts = ceil(0/512KB) = 0`, enviá-lo falhava com
+   * `400 FILE_PARTS_INVALID (caused by messages.SendMedia)`. Pulamos esses
+   * arquivos aqui (registrando o caminho relativo) para que o backup siga em
+   * vez de abortar no primeiro arquivo vazio.
+   */
+  emptySkipped: string[];
+  /**
    * True quando o `signal` interrompeu a varredura no meio.
    *
    * Sem este campo, `files.length` era o ÚNICO total que o runner tinha —
@@ -120,21 +132,27 @@ export async function walkSourceFolders(
   opts: { signal?: AbortSignal } = {},
 ): Promise<WalkResult> {
   if (!folders.paths || folders.paths.length === 0) {
-    return { files: [], unreadableRoots: [], truncatedByAbort: false };
+    return { files: [], unreadableRoots: [], emptySkipped: [], truncatedByAbort: false };
   }
   const out: WalkedFile[] = [];
   const unreadableRoots: string[] = [];
+  const emptySkipped: string[] = [];
 
   for (const root of folders.paths) {
     if (opts.signal?.aborted) break;
-    const ok = await walkOneFolder(root, folders.excludes ?? [], out, opts.signal);
+    const ok = await walkOneFolder(root, folders.excludes ?? [], out, opts.signal, emptySkipped);
     if (!ok) unreadableRoots.push(root);
     // Yield between source folders so a 5-folder config still keeps the
     // UI thread breathing.
     await yieldToUi();
   }
 
-  return { files: out, unreadableRoots, truncatedByAbort: !!opts.signal?.aborted };
+  return {
+    files: out,
+    unreadableRoots,
+    emptySkipped,
+    truncatedByAbort: !!opts.signal?.aborted,
+  };
 }
 
 async function walkOneFolder(
@@ -142,6 +160,7 @@ async function walkOneFolder(
   excludes: string[],
   out: WalkedFile[],
   signal?: AbortSignal,
+  emptySkipped?: string[],
 ): Promise<boolean> {
   let entries: RustDirEntry[];
   try {
@@ -209,6 +228,16 @@ async function walkOneFolder(
 
     const fileName = entryRel.split("/").pop() || "";
     if (isJunkFile({ name: fileName, folderPath: entryRel, size: entry.size })) {
+      continue;
+    }
+
+    // Arquivo de 0 bytes: a API do Telegram não armazena arquivos vazios por
+    // este caminho (parts precisa ser >= 1; uma parte vazia dá FILE_PART_EMPTY).
+    // Enviá-lo produzia `400 FILE_PARTS_INVALID (caused by messages.SendMedia)`
+    // e — pior — o runner tratava isso como erro fatal de sessão e abortava o
+    // backup inteiro. Pulamos com registro; o runner reporta a contagem.
+    if (!Number.isFinite(entry.size) || entry.size <= 0) {
+      emptySkipped?.push(entryRel);
       continue;
     }
 

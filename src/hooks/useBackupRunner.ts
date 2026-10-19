@@ -180,6 +180,15 @@ export function useBackupRunner(): UseBackupRunner {
           duration: 10000,
         });
       }
+
+      if (result.emptySkipped > 0) {
+        toast.info("Arquivos vazios ignorados", {
+          description:
+            `${result.emptySkipped} arquivo(s) de 0 byte foram ignorados — ` +
+            `a API do Telegram não armazena arquivos vazios.`,
+          duration: 8000,
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // The runner is supposed to never throw — failures surface in

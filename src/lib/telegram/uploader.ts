@@ -1,4 +1,4 @@
-﻿﻿import { Api } from "telegram";
+﻿import { Api } from "telegram";
 import { getClient } from "./client";
 // NOTE: we deliberately do NOT import @tauri-apps/plugin-fs here. Its
 // `open()` is gated by capability scopes (`fs:allow-open` etc.) — those
@@ -50,7 +50,20 @@ export async function uploadFileToTelegram(
   onRetry?: UploadRetryCallback,
 ): Promise<any> {
   const client = getClient();
-  
+
+  // Arquivos de 0 bytes não podem ser enviados por este caminho: `inputFile.parts`
+  // precisa ser >= 1 (`FILE_PARTS_INVALID` caso contrário) e uma parte vazia é
+  // rejeitada com `FILE_PART_EMPTY`. Como `totalParts = ceil(0/512KB) = 0`,
+  // enviar um arquivo vazio falhava com `400 FILE_PARTS_INVALID`. Falhamos com
+  // uma mensagem clara em vez do 400 críptico; o walker do backup pula esses
+  // arquivos antes de chegar aqui.
+  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+    throw new Error(
+      `KumaDrive não pode enviar "${fileName}": o arquivo está vazio (0 bytes) e ` +
+        `a API do Telegram não armazena arquivos de 0 byte.`,
+    );
+  }
+
   // Setup file ID using bigInt which is required by GramJS API
   const fileId = bigInt(Math.floor(Math.random() * 1e15));
   

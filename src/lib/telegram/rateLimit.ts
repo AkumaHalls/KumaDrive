@@ -123,6 +123,39 @@ export function isHardError(err: any): boolean {
 }
 
 /**
+ * Subconjunto de `isHardError` que representa falha FATAL de sessão/canal — as
+ * únicas que justificam abortar um backup inteiro.
+ *
+ * Erros de DADOS POR ARQUIVO (ex.: `FILE_PARTS_INVALID`, `FILE_ID_INVALID`,
+ * `MSG_ID_INVALID`) são "hard" para fins de retry — não adianta repetir a
+ * chamada — mas NÃO significam que a sessão morreu. Antes, o runner usava
+ * `isHardError` para decidir abortar: um único arquivo inválido (ex.: um
+ * arquivo de 0 bytes gerava `FilePartsInvalid`) derrubava o run TODO e a UI
+ * mostrava "Sessão do Telegram expirada. Reconecte sua conta", culpando a
+ * sessão por um problema de arquivo e deixando o resto dos arquivos sem envio.
+ *
+ * `isHardError` continua sendo o predicado de retry (e do indexQueue); o
+ * runner de backup usa `isRunAbortError` para a decisão de abortar.
+ */
+const RUN_ABORT_PATTERNS: RegExp[] = [
+  /AUTH_KEY_UNREGISTERED/i,
+  /SESSION_REVOKED/i,
+  /USER_DEACTIVATED/i,
+  /CHANNEL_PRIVATE/i,
+  /CHAT_WRITE_FORBIDDEN/i,
+  /PEER_ID_INVALID/i,
+  /INPUT_PEER_INVALID/i,
+];
+
+export function isRunAbortError(err: any): boolean {
+  const msg: string =
+    typeof err === "string"
+      ? err
+      : (err?.message || err?.errorMessage || err?.error?.errorMessage || "");
+  return RUN_ABORT_PATTERNS.some((p) => p.test(msg));
+}
+
+/**
  * Compute the backoff delay for a transient retry.
  *
  * FLOOD_WAIT errors use the time Telegram told us to wait (clamped).
