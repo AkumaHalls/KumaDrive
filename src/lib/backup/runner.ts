@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * Device backup runner — the orchestrator that does the actual work.
  *
  * Pipeline (driven by `runBackup({triggeredBy})`):
@@ -56,6 +56,11 @@ import {
 import { sanitizeFolderSegment, walkSourceFolders } from "./walker";
 import { detectOS, getDeviceName } from "../secure/deviceInfo";
 import { enqueueSave } from "../storage/indexQueue";
+import {
+  describeTelegramError,
+  isAuthError,
+  isSoftAuthError,
+} from "../telegram/authErrors";
 import { isHardError } from "../telegram/rateLimit";
 import { reconstructMissingFolders } from "../storage/metadataStore";
 import type { TeleFile } from "../types";
@@ -307,10 +312,16 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       await client.connect();
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Sessão expirada é o caso mais comum e o mais confuso: sem isto o
+    // usuário via "Telegram client unreachable: AUTH_KEY_UNREGISTERED" e
+    // ficava tentando o backup de novo sem saber que precisava deslogar.
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const error = isAuthError(err) || isSoftAuthError(err)
+      ? describeTelegramError(err)
+      : `Não foi possível conectar ao Telegram: ${rawMessage}`;
     return {
       ...baseResult,
-      error: `Telegram client unreachable: ${msg}`,
+      error,
       status: "failed",
       durationMs: Date.now() - startedAt,
       finishedAt: Date.now(),

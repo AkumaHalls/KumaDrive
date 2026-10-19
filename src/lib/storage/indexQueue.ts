@@ -1,4 +1,4 @@
-﻿﻿/**
+﻿/**
  * IndexQueue — per-channel async FIFO queue that owns ALL index persistence
  * to Telegram. This is the single writer rule for the index per channelId.
  *
@@ -38,8 +38,125 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { TeleFile } from "../types";
 
-/** CHUNK_SIZE must stay under Telegram's 4096-char message limit. */
-const CHUNK_SIZE = 10;
+/**
+ * Telegram recusa mensagens com mais de 4096 caracteres (erro
+ * 400: MESSAGE_TOO_LONG).
+ *
+ * O código usava um CHUNK_SIZE fixo (10 arquivos por mensagem). Isso
+ * quebrava com nomes de arquivo ou caminhos longos: um TeleFile
+ * serializado tem ~350 chars com nome curto, mas passa de 500 com
+ * nomes descritivos e pastas profundas — 10 deles estouravam o limite.
+ * O sintoma era o índice nunca sendo gravado e todo retry devolvendo
+ * MESSAGE_TOO_LONG.
+ *
+ * Agora o corte é calculado a partir do tamanho REAL do payload de cada
+ * arquivo, com folga para o wrapper JSON. CHUNK_MAX vira apenas um teto
+ * superior para não gerar milhares de mensagens minúsculas.
+ */
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+/** Teto de arquivos por chunk, independente do tamanho. */
+const CHUNK_MAX_FILES = 25;
+
+/**
+ * Monta o JSON exato que será enviado e devolve o comprimento, para que o
+ * caller possa decidir se cabe. Espelha a montagem feita em sendFallback
+ * (mesmas chaves, mesma ordem não é relevante para o tamanho).
+ */
+function indexPayloadLength(
+  files: TeleFile[],
+  chunkIndex: number,
+  totalChunks: number,
+): number {
+  return JSON.stringify({
+    kumadrive_index: true,
+    version: 1,
+    chunkIndex,
+    totalChunks,
+    files,
+  }).length;
+}
+
+/**
+ * Divide `state` em chunks que cabem no limite do Telegram.
+ *
+ * Acrescenta arquivo a arquivo e fecha o chunk assim que o payload
+ * ultrapassar o limite. Um arquivo isolado maior que o limite (prático
+ * impossível, mas possível com um nome patológico) fica sozinho num
+ * chunk — melhor receber MESSAGE_TOO_LONG num único arquivo do que
+ * perder o índice inteiro.
+ */
+function chunkIndexBySize(state: TeleFile[]): TeleFile[][] {
+  const chunks: TeleFile[][] = [];
+  let current: TeleFile[] = [];
+  // totalChunks é estimado durante o corte; overestimate deixa o payload
+  // maior, o que só torna o corte mais conservador.-safe.
+  const estimatedTotal = Math.max(1, Math.ceil(state.length / CHUNK_MAX_FILES));
+
+  for (const file of state) {
+    const candidate = current.length + 1 <= CHUNK_MAX_FILES &&
+      indexPayloadLength([...current, file], chunks.length, estimatedTotal) <=
+        TELEGRAM_MESSAGE_LIMIT;
+
+    if (candidate) {
+      current.push(file);
+      continue;
+    }
+
+    if (current.length > 0) {
+      chunks.push(current);
+      current = [];
+    }
+    current.push(file);
+  }
+
+  if (current.length > 0) chunks.push(current);
+  if (chunks.length === 0) chunks.push([]);
+
+  // Validação final: se algum chunk ainda estourar (totalChunks real maior
+  // que o estimado), re-corta com o total exato. Uma passada é suficiente
+  // porque o número de dígitos de totalChunks não muda o resultado de
+  // forma relevante, mas o laço protege contra patologias.
+  for (let pass = 0; pass < 2; pass++) {
+    const total = chunks.length;
+    const over = chunks.findIndex(
+      (c) => indexPayloadLength(c, 0, total) > TELEGRAM_MESSAGE_LIMIT,
+    );
+    if (over === -1) break;
+
+    // Re-corta todos os chunks estourados usando o total real.
+    for (let i = 0; i < chunks.length; i++) {
+      if (indexPayloadLength(chunks[i], i, total) <= TELEGRAM_MESSAGE_LIMIT) continue;
+      const pieces = splitOversizedChunk(chunks[i], total);
+      chunks.splice(i, 1, ...pieces);
+      i += pieces.length - 1;
+    }
+  }
+
+  return chunks;
+}
+
+/** Divide um chunk que estourou o limite, respeitando o total real. */
+function splitOversizedChunk(chunk: TeleFile[], totalChunks: number): TeleFile[][] {
+  const out: TeleFile[][] = [];
+  let current: TeleFile[] = [];
+  for (const file of chunk) {
+    const candidate = current.length + 1 <= CHUNK_MAX_FILES &&
+      indexPayloadLength([...current, file], out.length, totalChunks) <=
+        TELEGRAM_MESSAGE_LIMIT;
+    if (candidate) {
+      current.push(file);
+      continue;
+    }
+    if (current.length > 0) {
+      out.push(current);
+      current = [];
+    }
+    current.push(file);
+  }
+  if (current.length > 0) out.push(current);
+  if (out.length === 0) out.push(chunk);
+  return out;
+}
 /** Fetch + edit + pin timeouts (ms). */
 const FETCH_TIMEOUT_MS = 5000;
 const EDIT_TIMEOUT_MS = 8000;
@@ -343,11 +460,7 @@ class ChannelQueue {
       throw err; // Already classified upstream as transient or hard.
     }
 
-    const chunks: TeleFile[][] = [];
-    for (let i = 0; i < state.length; i += CHUNK_SIZE) {
-      chunks.push(state.slice(i, i + CHUNK_SIZE));
-    }
-    if (chunks.length === 0) chunks.push([]);
+    const chunks = chunkIndexBySize(state);
 
     // 1. Find the "current" existing index set — the messages we should edit
     //    or delete. This must use the SAME coherent-set selection logic as
