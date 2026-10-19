@@ -1,93 +1,76 @@
-name: Release Build
+name: Release
 
+# Dispara ao criar/pushar uma tag v* (ex.: v0.1.0)
 on:
   push:
-    branches:
-      - main
-      - pro
     tags:
       - 'v*'
-  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  build-tauri:
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: 'macos-latest'
-            args: '--target universal-apple-darwin'
-          - platform: 'windows-latest'
-            args: ''
-          - platform: 'ubuntu-22.04'
-            args: '--bundles deb,appimage'
-
-    runs-on: ${{ matrix.platform }}
+  release:
+    name: Build & Release
+    runs-on: windows-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libfuse2
-
-      - name: Install Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
-      - name: Install Rust stable
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+      - name: Install Linux deps
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install dependencies
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm deps
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build Tauri app
+      - name: Build & bundle (assinado)
         uses: tauri-apps/tauri-action@v0
         env:
+          # Chave privada de assinatura do updater, guardada como secret.
+          # Sem isso, o artefato .sig não é gerado e o app não consegue
+          # validar atualizações. Ver README: "Publicando uma release".
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'TeleDrive v__VERSION__'
-          releaseBody: 'Installers for macOS (.dmg), Windows (.exe), and Linux (.AppImage, .deb).'
+          tagName: ${{ github.ref_name }}
+          releaseName: KumaDrive ${{ github.ref_name }}
+          releaseBody: |
+            ## KumaDrive ${{ github.ref_name }}
+
+            Instalador para Windows.
+
+            - **NSIS** (recomendado — suporta atualização automática): `*-setup.exe`
+            - **MSI**: `*.msi`
+
+            O app verifica atualizações em Configurações → Sobre → Verificar atualizações.
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: teledrive-${{ matrix.platform }}
-          path: |
-            src-tauri/target/**/bundle/dmg/*.dmg
-            src-tauri/target/**/bundle/nsis/*.exe
-            src-tauri/target/**/bundle/msi/*.msi
-            src-tauri/target/**/bundle/deb/*.deb
-            src-tauri/target/**/bundle/appimage/*.AppImage
-          if-no-files-found: warn
-
+      - name: Resume
+        shell: bash
+        run: |
+          echo "### Release ${{ github.ref_name }} publicada"
+          echo ""
+          echo "Artefatos (incluindo latest.json e .sig) foram anexados automaticamente"
+          echo "pela tauri-action. O arquivo latest.json e o que o app consulta."
+          echo ""
+          echo "1. Va em https://github.com/${{ github.repository }}/releases"
+          echo "2. Edite o rascunho e publique (draft: true)"
+          echo "3. Teste: /verificar-atualizacoes no app"

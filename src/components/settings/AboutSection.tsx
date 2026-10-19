@@ -17,6 +17,8 @@ const GithubIcon = (props: React.SVGProps<SVGSVGElement>) => (
   </svg>
 );
 import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -48,14 +50,65 @@ export default function AboutSection() {
     }
   };
 
-  const handleCheckUpdates = () => {
+  /**
+   * Verifica atualizações contra a release do GitHub.
+   *
+   * Antes isto era um stub: esperava 800ms e mostrava "você está atualizado"
+   * sem consultar nada. Agora consulta o endpoint configurado em
+   * `plugins.updater.endpoints` e só instala se a assinatura minisign
+   * do artefato for válida (chave pública em tauri.conf.json).
+   */
+  const handleCheckUpdates = async () => {
     setChecking(true);
-    setTimeout(() => {
-      setChecking(false);
-      toast.success("Você está atualizado!", {
-        description: `O KumaDrive v${version} é a versão mais recente.`,
+    try {
+      const update = await check();
+
+      if (!update) {
+        toast.success("Você está atualizado!", {
+          description: `O KumaDrive v${version} é a versão mais recente.`,
+        });
+        return;
+      }
+
+      const found = `Versão ${update.version} disponível`;
+      if (update.body) {
+        toast.info(found, { description: update.body.slice(0, 400) });
+      } else {
+        toast.info(found);
+      }
+
+      let downloaded = 0;
+      let total = 0;
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data?.contentLength ?? 0;
+          downloaded = 0;
+        } else if (event.event === "Progress") {
+          downloaded += event.data?.chunkLength ?? 0;
+          const pct = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+          toast.loading(`Baixando atualização — ${pct}%`, {
+            id: "kumadrive-update-progress",
+          });
+        }
       });
-    }, 800);
+
+      toast.success("Atualização instalada!", {
+        id: "kumadrive-update-progress",
+        description: "O KumaDrive será reiniciado para aplicar a atualização.",
+      });
+
+      setTimeout(async () => {
+        await relaunch();
+      }, 1500);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Falha de rede é o caso mais comum: não release publicada, offline etc.
+      toast.error("Não foi possível verificar atualizações", {
+        description: message,
+      });
+    } finally {
+      setChecking(false);
+    }
   };
 
   return (
