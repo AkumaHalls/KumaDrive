@@ -10,7 +10,7 @@
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
 [![総ダウンロード数](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
-[![最新リリース](https://img.shields.io/badge/リリース-v0.2.9-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
+[![最新リリース](https://img.shields.io/badge/リリース-v0.2.10-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![YouTube デモ動画](https://img.shields.io/badge/YouTube-動画デモ-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![ライセンス: GPL v3](https://img.shields.io/badge/ライセンス-GPLv3-gray.svg?style=flat-square)](../LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
@@ -53,7 +53,7 @@ Telegram はプライベートチャンネルで実質無制限のクラウド�
 
 ## 📥 ダウンロード
 
-最新リリース: **v0.2.9** · 各 OS 向けビルド済みネイティブインストーラー：
+最新リリース: **v0.2.10** · 各 OS 向けビルド済みネイティブインストーラー：
 
 | オペレーティングシステム | パッケージ形式 | 直接ダウンロード | サイズ |
 |:---|:---|:---|---:|

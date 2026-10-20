@@ -5,6 +5,15 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.10] — 2026-10-20
+
+### Corrigido
+- **src/lib/telegram/uploader.ts** — a causa-raiz de TODAS as falhas de upload de arquivo: o KumaDrive enviava blocos de 1 MB ao Telegram, mas o teto por parte (`SaveFilePart`/`SaveBigFilePart`) é **512 KB** — o mesmo valor que a própria biblioteca GramJS usa internamente e o mesmo do Teledrive original. O servidor não responde erro para uma parte acima do teto: apenas a ignora, o que virava o timeout de 30 s que derrubava todos os arquivos grandes. Pior: depois de algumas partes ignoradas, a conexão inteira parava de ser respondida — arquivos pequenos (que produziam uma parte válida) e até a leitura do canal começavam a dar timeout, o que parecia "sessão bloqueada" (o re-login não resolvia porque o problema era o conteúdo enviado, não a sessão). É também a explicação definitiva do antigo "sobe 2 arquivos e falha": os 2 que subiam eram os menores que 512 KB. Agora o mecanismo de upload é o espelho exato do original: **512 KB por parte, timeout de 20 s, 5 tentativas, espera curta de rate-limit** — nada de divergência de pacing.
+- **src/lib/telegram/rateLimit.ts** — o comentário do parâmetro de teto de FLOOD_WAIT ainda descrevia o comportamento antigo do uploader (teto longo de 900 s, revertido de propósito ao espelhar o upstream); atualizado para o uso atual (teto longo permanece apenas no índice, que precisa convergir) com aviso explícito para não reintroduzi-lo no upload.
+
+### Agradecimento de diagnóstico
+O desbloqueio veio do teste de campo do usuário: o Teledrive original instalado na mesma máquina, com a mesma conta, subia tudo — e o KumaDrive com sessão recém-recriada continuava travado. Foi isso que descartou a teoria da sessão e apontou para o payload. O registro completo da investigação está no `vault_state.log`.
+
 ## [0.2.9] — 2026-10-20
 
 ### Corrigido

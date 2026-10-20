@@ -100,7 +100,7 @@ const BACKUP_UPLOAD_CONCURRENCY = 2;
  * sucesso entre elas) antes de concluir que a sessão está penalizada e
  * abortar o run com a instrução de re-login. 4 cobre os 2 workers com
  * folga (um blip de rede isolado reseta no sucesso seguinte) sem deixar
- * o usuário esperar os ~95s de timeout por arquivo mais de ~6 minutos.
+ * o usuário esperar os ~100s de timeout por arquivo mais de ~7 minutos.
  */
 const BACKUP_STALL_ABORT_THRESHOLD = 4;
 

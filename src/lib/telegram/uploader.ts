@@ -12,26 +12,38 @@ import { invoke } from "@tauri-apps/api/core";
 import { withTimeout } from "../storage/metadataStore";
 import {
   withTelegramRetry,
-  FLOOD_WAIT_MAX_CAP_SECONDS,
 } from "./rateLimit";
 
 /**
- * Tamanho do chunk enviado por `SaveFilePart`/`SaveBigFilePart`.
+ * Tamanho do chunk enviado por `SaveFilePart`/`SaveBigFilePart`: 512KB.
  *
- * O Telegram recomenda de 512KB a 1MB. Usar 1MB (o teto recomendado)
- * METADE dos chunks de um arquivo — e, com isso, metade das leituras de
- * disco, metade das conversões `Uint8Array → Buffer` e metade dos
- * round-trips de IPC (`read_file_chunk`) e de rede. Num arquivo de 1GB
- * isso significa ~1024 chunks em vez de ~2048.
+ * 512KB é o teto que o próprio GramJS usa (getAppropriatedPartSize,
+ * Utils.js: 128KB <100MB, 256KB <750MB, 512KB acima) e o mesmo valor do
+ * Teledrive original. Este fork chegou a usar 1MB aqui (commit 7085adc,
+ * "o Telegram recomenda até 1MB" — falso), e TODOS os sintomas de campo
+ * bateram com partes acima do teto:
  *
- * Cuidado: `parts` (o número de partes do arquivo) é derivado daqui e
- * precisa caber no `int` do MTProto, então não subimos além de 1MB.
+ *   - hipótese corroborada pela evidência (GramJS nunca envia >512KB; o
+ *     upstream idem; arquivos <512KB subiam e os maiores nunca): o
+ *     servidor não responde erro para uma parte inválida — apenas a
+ *     ignora, produzindo o timeout de 30s por tentativa que o log
+ *     mostrou em TODOS os arquivos grandes;
+ *   - depois de algumas partes ignoradas, a conexão inteira para de ser
+ *     respondida (arquivos pequenos válidos e até `getMessages` começam
+ *     a dar timeout) — o sintoma parecia "sessão bloqueada", mas re-login
+ *     não resolvia: o veneno era o payload;
+ *   - arquivos <512KB (uma única parte válida) subiam: por isso o
+ *     relato antigo "sobe 2 arquivos e falha" — os 2 pequenos passavam.
+ *
+ * NÃO subir isto de volta para 1MB: 512KB é o teto do Telegram por parte.
+ * (Nota: um arquivo de 4 GiB gera 8192 partes de 512KB — o mesmo caminho
+ * que os clientes oficiais usam para uploads Premium de 4 GB.)
  */
-const CHUNK_SIZE = 1024 * 1024; // 1MB (teto recomendado pelo Telegram)
-// Timeout por chunk. Com chunks de 1MB dobramos o volume por round-trip,
-// então subimos o teto de 20s para 30s — uma pausa de rede não deve
-// abortar um chunk que ainda está progredindo.
-const CHUNK_TIMEOUT_MS = 30_000;
+const CHUNK_SIZE = 512 * 1024; // 512KB — teto do Telegram por parte
+// Timeout por chunk: 20s, o mesmo valor do Teledrive original. Com partes
+// válidas de 512KB este é o teto comprovado em campo (o upstream usa-o
+// há anos). Um chunk válido responde em fração de segundos.
+const CHUNK_TIMEOUT_MS = 20_000;
 const SENDFILE_TIMEOUT_MS = 30_000;
 
 /**
@@ -210,13 +222,11 @@ export async function uploadFileToTelegram(
       // from disk on each attempt via the closure — important because the
       // seek/read may have advanced the handle position mid-failure.
       //
-      // FLOOD_WAIT aqui usa o TETO LONGO (900s), não o curto de 30s. Motivo
-      // (evidência de campo): o Telegram pediu esperas de 125s→600s→884s e
-      // o app, com teto de 30s, esperava 30s e reenviava o chunk — o que
-      // RENOVA e AGRAVA o flood em vez de resolvê-lo. O resultado era o
-      // backup falhar com "falha na conexão" após subir 2 arquivos. Com o
-      // teto longo esperamos o prazo que o Telegram exigiu e o upload
-      // converge em vez de escalar.
+      // Pacing ESPELHADO do Teledrive original: 5 tentativas por parte e
+      // teto curto de FLOOD_WAIT (30s). Com partes válidas de 512KB este
+      // é o comportamento comprovado em campo pelo upstream — e se um
+      // rate-limit real aparecer, o arquivo falha rápido e o run segue,
+      // em vez de pendurar o backup numa espera longa.
       const chunkLabel = `${isBig ? "SaveBigFilePart" : "SaveFilePart"}(${partIndex}/${totalParts})`;
       await withTelegramRetry(
         () =>
@@ -241,12 +251,10 @@ export async function uploadFileToTelegram(
             chunkLabel
           ),
         chunkLabel,
-        // Menos tentativas que antes (5) de propósito: como cada espera de
-        // FLOOD_WAIT agora respeita o prazo real, uma tentativa longa já
-        // resolve; insistir 5× só multiplicaria a espera total. 3 tentativas
-        // cobrem blips de rede sem transformar um rate-limit persistente
-        // numa espera de horas.
-        3,
+        // 5 tentativas por parte — o mesmo valor do Teledrive original,
+        // comprovado em campo. Com partes válidas de 512KB, 5×20s cobre
+        // qualquer blip de rede sem exagero.
+        5,
         onRetry
           ? (e) =>
               onRetry({
@@ -254,9 +262,6 @@ export async function uploadFileToTelegram(
                 label: chunkLabel,
               })
           : undefined,
-        // Teto de FLOOD_WAIT longo: esperar o prazo pedido, não retentar a
-        // cada 30s (que agrava o flood).
-        FLOOD_WAIT_MAX_CAP_SECONDS,
       );
       
       // Update progress
@@ -298,9 +303,10 @@ export async function uploadFileToTelegram(
           finalizeLabel
         ),
       finalizeLabel,
-      // Finalize cap: 3 attempts. Se um FLOOD_WAIT vier aqui, esperamos o
-      // prazo real (teto longo) — os chunks já estão no Telegram, então
-      // convergir vale mais que desistir rápido e reenviar tudo depois.
+      // Finalize cap: 3 attempts × teto curto — o mesmo pacing do Teledrive
+      // original. Os chunks já estão no Telegram; se um rate-limit real
+      // aparecer, falhar o arquivo rápido e retomar depois é o
+      // comportamento comprovado do upstream (e não congela o overlay).
       3,
       onRetry
         ? (e) =>
@@ -309,7 +315,6 @@ export async function uploadFileToTelegram(
               label: finalizeLabel,
             })
         : undefined,
-      FLOOD_WAIT_MAX_CAP_SECONDS,
     );
     
     return result;

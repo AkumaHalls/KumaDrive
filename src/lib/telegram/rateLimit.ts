@@ -253,12 +253,19 @@ export type TelegramRetryEvent = {
  *                     instead of a frozen progress bar.
  * @param floodCapSeconds Teto do FLOOD_WAIT para ESTA chamada.
  *
- *   O padrão (`FLOOD_WAIT_CAP_SECONDS` = 30s) é o teto CURTO. Ele só é
- *   seguro quando retentar cedo não piora o bloqueio — o que NÃO é o caso
- *   de upload de arquivo: cada retry prematuro reenvia o chunk e ESCALA o
- *   flood (o log de campo mostrou 125s → 600s → 884s). Por isso o uploader
- *   passa `FLOOD_WAIT_MAX_CAP_SECONDS` (900s) para esperar o prazo que o
- *   Telegram pediu de verdade, em vez de insistir de 30 em 30s.
+ *   O padrão (`FLOOD_WAIT_CAP_SECONDS` = 30s) é o teto CURTO — usado hoje
+ *   pelo uploader (pacing espelhado do Teledrive original: um rate-limit
+ *   real faz o arquivo falhar rápido e o run seguir, em vez de pendurar
+ *   o backup numa espera longa).
+ *
+ *   O teto LONGO (`FLOOD_WAIT_MAX_CAP_SECONDS` = 900s) é usado pelo
+ *   `IndexQueue` (caminho NÃO-interativo do índice): lá o commit precisa
+ *   esperar o prazo que o Telegram exigiu para convergir — retentar cedo
+ *   reenviaria a epoch inteira e ESCALARIA o flood (o log de campo mostrou
+ *   125s → 600s → 884s na era em que o índice era reescrito por arquivo).
+ *
+ *   NÃO reintroduzir o teto longo no uploader: o que já foi tentado (v0.2.7)
+ *   e revertido de propósito ao espelhar o upstream (v0.2.10).
  */
 export async function withTelegramRetry<T>(
   fn: () => Promise<T>,
