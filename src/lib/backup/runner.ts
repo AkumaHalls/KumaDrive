@@ -66,16 +66,28 @@ import { reconstructMissingFolders } from "../storage/metadataStore";
 import type { TeleFile } from "../types";
 
 /**
- * Breather between batches. After every BACKUP_BATCH_SIZE successful
- * uploads, the runner pauses for BACKUP_BREATHER_MS to let Telegram's
- * per-second flood counter reset. Without this, a 218-file backup
- * hits FLOOD_WAIT on the ~17th file (the user has been seeing this
- * exact pattern). The values are tuned for Telegram's published rate
- * window (a few seconds wide). 3 files / 2s gives a comfortable margin
- * for SaveFilePart + SaveBigFilePart + sendFile RPC triplets.
+ * Breather entre lotes. Antes era um sleep FIXO de 2s a cada 3 arquivos
+ * (≈200s de espera ociosa num backup de 300 arquivos). Agora o breather é
+ * ADAPTATIVO: a base é curta (BACKUP_BREATHER_BASE_MS) e só escalamos para
+ * o valor antigo (BACKUP_BREATHER_MAX_MS) quando um retry/FLOOD_WAIT
+ * realmente aconteceu neste lote — ou seja, só pagamos a pausa longa
+ * quando o Telegram de fato sinalizou rate-limit.
  */
 const BACKUP_BATCH_SIZE = 3;
-const BACKUP_BREATHER_MS = 2_000;
+const BACKUP_BREATHER_BASE_MS = 250;
+const BACKUP_BREATHER_MAX_MS = 2_000;
+
+/**
+ * Quantos uploads de arquivos rodam em paralelo no backup.
+ *
+ * O `uploadFileToTelegram` já faz o backoff de FLOOD_WAIT por chunk; o
+ * limite aqui é o mesmo pool de ~3 que o envio normal (uploadManager)
+ * usa, para não saturar a conexão MTProto nem o rate-limit por segundo do
+ * Telegram. As escritas (manifesto / índice) continuam SERIALIZADAS no
+ * passo de commit de cada arquivo, então o paralelismo é só de rede+disco
+ * de leitura.
+ */
+const BACKUP_UPLOAD_CONCURRENCY = 3;
 
 /**
  * A cada quantos arquivos reavaliamos o gate de bootstrap.
@@ -319,8 +331,8 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   // the same config produces the same display name (idempotent).
   const rootDisplayBasename = buildRootDisplayNames(folders.paths);
 
-  const channelId = await resolveChannelId();
-  if (!channelId) {
+  const resolvedChannelId = await resolveChannelId();
+  if (!resolvedChannelId) {
     return {
       ...baseResult,
       error: "O canal de armazenamento não está pronto. Faça login novamente para concluir a configuração.",
@@ -329,6 +341,9 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       finishedAt: Date.now(),
     };
   }
+  // Captura num `const` não-nulo: o narrowing de `resolvedChannelId` não
+  // sobrevive para dentro das closures dos workers.
+  const channelId: string = resolvedChannelId;
 
   // Ensure the Telegram client is connected before starting.
   try {
@@ -437,9 +452,6 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   }
   const diff = diffAgainstManifest(manifest, walked);
 
-  const totalToUpload = diff.toUpload.length;
-  let filesUploaded = 0;
-  let filesFailed = 0;
   let firstError: string | null = null;
   // Quantas vezes a gravação do manifesto falhou neste run. O manifesto é
   // o que impede o re-upload na próxima execução; se ele não persistiu,
@@ -458,17 +470,58 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   //      devolvia "success", e NENHUM entrava no índice. Todos órfãos
   //      até o orphan-scan do próximo cold start.
   let bootstrapGateReady = false;
+  // Inicia defasado para que a PRIMEIRA checagem aconteça já no primeiro
+  // arquivo (com 0 - (-50) >= 50). Com o loop sequencial antigo o gate era
+  // checado em i=0 via `i % N === 0`; sem esta defasagem, os primeiros
+  // ~49 arquivos enviados ficariam fora do índice até o próximo cold start.
+  let bootstrapGateCheckedAt = -BOOTSTRAP_GATE_RETRIES;
 
-  // Upload loop. Sequential — the existing uploadFileToTelegram already
-  // manages Telegram-side FLOOD_WAIT backoff, and parallel uploads from
-  // the backup runner would race the user's regular upload queue.
-  for (let i = 0; i < diff.toUpload.length; i++) {
-    if (opts.signal?.aborted) {
-      firstError ??= "Cancelled by user.";
-      break;
-    }
+  // Contadores compartilhados pelos workers do pool. O JS é single-threaded,
+  // então não há corrida: cada `await` é um ponto de suspensão, mas as
+  // atualizações de contador acontecem entre awaits, sem interleave.
+  let uploadedCount = 0;
+  let failedCount = 0;
+  // Contador monotônico de retries/FLOOD_WAIT observados desde o último
+  // breather. Um booleano global era resetado por qualquer worker, podendo
+  // descartar o sinal de retry de outro worker concorrente.
+  let retriesSinceBreather = 0;
+  // Abort cooperativo: um worker que encontra erro fatal de sessão marca
+  // isto; os demais param de pegar novos arquivos.
+  let abortRun = false;
+  // Índice compartilhado do próximo arquivo a processar.
+  let nextIndex = 0;
+  const totalToProcess = diff.toUpload.length;
 
+  // Fila de commits (promise-chain). O envio dos arquivos é PARALELO, mas
+  // os passo de commit (gravar manifesto + mesclar índice) precisam rodar
+  // SERIALIZADOS: `manifest` é uma variável compartilhada reatribuída por
+  // inteiro, e o índice não pode coalescer escritas fora de ordem. Cada
+  // worker enfileira seu commit aqui; a fila garante ordem FIFO.
+  let commitChain: Promise<void> = Promise.resolve();
+  function enqueueCommit(task: () => Promise<void>): Promise<void> {
+    const next = commitChain.then(task, task);
+    // Não deixa uma rejeição travar a cadeia para os próximos commits.
+    commitChain = next.catch(() => {});
+    return next;
+  }
+
+  /**
+   * Processa UM arquivo: monta o folderPath, envia, grava manifesto,
+   * mescla no índice e trata erros.
+   *
+   * Segurança entre workers: o JS é single-threaded, então não há corrida
+   * de dados real. O único cuidado é que `manifest` é reatribuído por
+   * inteiro (`manifest = recordUpload(manifest, ...)`) em vez de sofrer
+   * mutação parcial — assim dois workers nunca corrompem o objeto
+   * compartilhado, mesmo intercalando seus `await`.
+   */
+  async function uploadOneFile(i: number): Promise<void> {
     const file = diff.toUpload[i];
+    // Atualiza o rótulo do overlay só UMA vez por arquivo (na primeira
+    // notificação de progresso), não a cada chunk: com 3 workers em
+    // paralelo, atualizar por-chunk faria o rótulo piscar entre os
+    // arquivos concorrentes. Uma vez por arquivo mantém o rótulo estável.
+    let announcedCurrentFile = false;
     // Build the channel-side folder path. Mirror the source tree under
     // the device root, preserving nested folder structure. Example:
     //   sourceRoot: /Users/me/Documents
@@ -565,13 +618,27 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
         file.size,
         file.absPath,
         folderPath,
-        undefined, // onProgress — chunk-level progress, not used by the backup flow
+        // onProgress — antes era `undefined`. Agora atualiza o rótulo do
+        // overlay com o arquivo em envio, mas só na primeira notificação
+        // (ver `announcedCurrentFile` acima) para não piscar entre os 3
+        // workers concorrentes.
+        (uploadedBytes, totalBytes) => {
+          void uploadedBytes;
+          void totalBytes;
+          if (!announcedCurrentFile) {
+            announcedCurrentFile = true;
+            useBackupProgressStore.setState({ currentFile: file.absPath });
+          }
+        },
         // onRetry — surface FLOOD_WAIT / network retries to the progress
         // store so the overlay shows "Retrying 3/5 — waiting 30s" instead
         // of a frozen counter. Keeps the user informed during a long
         // single-file stall. We pull the action fresh on each callback
         // so a re-render or HMR doesn't capture a stale reference.
         (e) => {
+          // Sinaliza ao breather adaptativo que este lote precisou de
+          // retry → a pausa de lote escala para o valor longo.
+          retriesSinceBreather++;
           useBackupProgressStore.getState().setRetry({
             attempt: e.attempt,
             maxAttempts: e.maxAttempts,
@@ -586,6 +653,10 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
           `upload returned no usable message id: ${JSON.stringify(message).slice(0, 120)}`,
         );
       }
+      // Commit serializado: manifesto + índice. Roda na fila `commitChain`
+      // para que a reatribuição de `manifest` e a escrita do índice não
+      // intercalem entre os 3 workers paralelos.
+      await enqueueCommit(async () => {
       manifest = recordUpload(manifest, file.absPath, {
         mtimeMs: file.mtimeMs,
         size: file.size,
@@ -644,7 +715,10 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       // gravado. Se continuarmos sem gate, `bootstrapGateReady` fica
       // `false` e o índice é deixado para o orphan-scan — o
       // comportamento seguro.
-      if (!bootstrapGateReady && i % BOOTSTRAP_GATE_RETRIES === 0) {
+      // Gate reavaliado periodicamente. `bootstrapGateCheckedAt` guarda o
+      // último índice em que checamos, para não reconsultar por arquivo.
+      if (!bootstrapGateReady && i - bootstrapGateCheckedAt >= BOOTSTRAP_GATE_RETRIES) {
+        bootstrapGateCheckedAt = i;
         bootstrapGateReady = await waitForBootstrap(8000);
       }
       if (bootstrapGateReady) {
@@ -699,38 +773,38 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
           `The orphan scan will pick this file up on the next cold start.`,
         );
       }
+      }); // fim do enqueueCommit
 
-      filesUploaded++;
+      uploadedCount++;
       opts.onProgress?.({
-        uploaded: filesUploaded + filesFailed,
-        total: totalToUpload,
+        uploaded: uploadedCount + failedCount,
+        total: totalToProcess,
         currentFile: file.absPath,
       });
 
-      // Per-batch breather. Telegram tracks RPCs per ~second and
-      // enforces FLOOD_WAIT_X once a window is exceeded. The user was
-      // hitting a 30s FLOOD_WAIT on file 17 of a 218-file backup with
-      // no breather between files — the per-second counter kept
-      // climbing even though each individual upload looked fast. A
-      // short, deterministic pause every N successes drains the
-      // counter and prevents the user from ever seeing a stalled
-      // overlay in the common case. We DON'T breather after a failed
-      // file (the FLOOD_WAIT retry already inserted its own wait) and
-      // we DON'T breather after the last file in the loop. The breather
-      // is interruptible: a cancel signal short-circuits the wait.
+      // Per-batch breather ADAPTATIVO. Antes era um sleep fixo de 2s a
+      // cada 3 arquivos. Agora só pausamos de verdade quando o lote
+      // recente precisou de um retry/FLOOD_WAIT (`batchHadRetry`), e nesse
+      // caso escalamos para o valor longo; no caminho comum a pausa é
+      // curta (BACKUP_BREATHER_BASE_MS). Sem breather após o último
+      // arquivo e sem contar arquivos falhos como "sucesso do lote". O
+      // sleep é interrompível: um cancel curto-circuita.
       if (
-        filesUploaded > 0 &&
-        filesUploaded % BACKUP_BATCH_SIZE === 0 &&
-        i < diff.toUpload.length - 1
+        uploadedCount > 0 &&
+        uploadedCount % BACKUP_BATCH_SIZE === 0 &&
+        i < totalToProcess - 1
       ) {
+        const hadRetry = retriesSinceBreather > 0;
+        const breatheMs = hadRetry ? BACKUP_BREATHER_MAX_MS : BACKUP_BREATHER_BASE_MS;
+        retriesSinceBreather = 0;
         console.log(
-          `[backup.runner] breather: ${filesUploaded}/${totalToUpload} done; ` +
-          `pausing ${BACKUP_BREATHER_MS}ms to clear Telegram rate-limit window`,
+          `[backup.runner] breather: ${uploadedCount}/${totalToProcess} done; ` +
+          `pausing ${breatheMs}ms (${hadRetry ? "escalado apos retry" : "base"})`,
         );
-        await interruptibleSleep(BACKUP_BREATHER_MS, opts.signal);
+        await interruptibleSleep(breatheMs, opts.signal);
       }
     } catch (err) {
-      filesFailed++;
+      failedCount++;
       const msg = err instanceof Error ? err.message : String(err);
       firstError ??= msg;
       console.warn(`[backup.runner] failed to upload ${file.absPath}:`, msg);
@@ -746,8 +820,8 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
         console.warn("[backup.runner] manifest save (error path) failed:", manifestErr);
       }
       opts.onProgress?.({
-        uploaded: filesUploaded + filesFailed,
-        total: totalToUpload,
+        uploaded: uploadedCount + failedCount,
+        total: totalToProcess,
         currentFile: file.absPath,
       });
 
@@ -758,19 +832,59 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       // an indefinite wait. Without this short-circuit, a revoked session
       // turns into a multi-minute loop of identical errors.
       if (isRunAbortError(err)) {
-        // Account for the rest of the queue so filesFailed reflects what
-        // actually happened (and the user knows the magnitude of the loss).
-        filesFailed += diff.toUpload.length - i - 1;
         firstError ??=
           "Sessão do Telegram expirada. Reconecte sua conta em Configurações → Conta do Telegram e execute o backup novamente.";
-        console.warn(
-          `[backup.runner] hard Telegram error; aborting run. ${diff.toUpload.length - i - 1} files remaining skipped.`,
-        );
-        break;
+        // Marca o run para abortar. A CONTAGEM dos arquivos pulados é feita
+        // UMA vez, depois que todos os workers em voo drenarem (ver o
+        // bloco após Promise.all). Somar aqui contaria arquivos que outros
+        // workers já enviaram (índices fora de ordem no pool) e/ou seria
+        // somado várias vezes se 2 workers falhassem com o mesmo erro.
+        abortRun = true;
       }
       // Continue with the rest for transient errors — partial is better than nothing.
     }
   }
+
+  // Pool de uploaders. `nextIndex` é o índice compartilhado; cada worker
+  // pega o próximo até esgotar, ou para quando o run é abortado/cancelado.
+  // O trabalho paralelo é só de rede + leitura de disco; as escritas
+  // (manifesto/índice) acontecem dentro de `uploadOneFile` e são seguras
+  // porque cada worker só entra nelas após o seu próprio `await` de rede,
+  // e o `manifest` é reatribuído por inteiro (sem mutação parcial).
+  async function worker(): Promise<void> {
+    while (true) {
+      if (abortRun || opts.signal?.aborted) return;
+      const i = nextIndex++;
+      if (i >= totalToProcess) return;
+      await uploadOneFile(i);
+    }
+  }
+
+  if (opts.signal?.aborted) {
+    firstError ??= "Cancelled by user.";
+  } else {
+    const workerCount = Math.min(BACKUP_UPLOAD_CONCURRENCY, totalToProcess);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  }
+
+  // Normalização do relatório pós-dreno: conta os arquivos que NUNCA foram
+  // processados (pulados pelo abort/cancel) exatamente uma vez, depois que
+  // todos os workers em voo terminaram. `processed` nunca passa do total.
+  {
+    const processed = uploadedCount + failedCount;
+    if (processed < totalToProcess && (abortRun || opts.signal?.aborted)) {
+      const skipped = totalToProcess - processed;
+      if (abortRun) {
+        console.warn(
+          `[backup.runner] hard Telegram error; aborting run. ${skipped} files skipped (processed ${processed}/${totalToProcess}).`,
+        );
+      }
+      failedCount += skipped;
+    }
+  }
+
+  const filesUploaded = uploadedCount;
+  const filesFailed = failedCount;
 
   // Aggregate status. Order matters:
   //   1. Any filesFailed → "partial" (if some uploaded) or "failed" (if none did).

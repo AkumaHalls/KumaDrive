@@ -5,6 +5,19 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.5] — 2026-10-20
+
+### Alterado
+- **src/lib/backup/runner.ts** — o backup de uma pasta agora envia vários arquivos ao mesmo tempo (até 3 em paralelo) em vez de um por vez. O envio era o gargalo: cada arquivo esperava o anterior terminar. A gravação do manifesto e a mesclagem do índice continuam em ordem, através de uma fila de commits — o paralelismo é só de rede e leitura de disco.
+- **src/lib/backup/runner.ts** — a pausa entre lotes de arquivos deixou de ser fixa (2 s a cada 3 arquivos) e passou a ser adaptativa: 250 ms no caminho normal, subindo para 2 s apenas quando um lote de fato precisou esperar por limite de taxa do Telegram. Num backup de 300 arquivos isso remove cerca de 200 s de espera ociosa.
+- **src/lib/backup/runner.ts** — o backup passou a mostrar o arquivo em envio no overlay de progresso (antes o rótulo ficava sempre genérico).
+- **src/lib/telegram/uploader.ts** — o tamanho do bloco enviado subiu de 512 KB para 1 MB (recomendado pelo Telegram). Um arquivo de 1 GB passa de ~2048 para ~1024 blocos, com metade das leituras de disco e das idas e voltas de rede.
+
+### Corrigido
+- **src-tauri/src/lib.rs** — a leitura de blocos do upload reabria e reposicionava o arquivo a cada bloco. Agora o arquivo fica em cache (com limite de 16 arquivos e expiração de 30 s) e só o bloco é lido, cortando as chamadas de sistema por bloco.
+- **src-tauri/src/lib.rs** — a leitura de um bloco podia devolver menos bytes que o esperado num ponto no meio do arquivo (arquivos em rede), enviando dados faltando ao Telegram. Agora a leitura repete até completar o bloco ou chegar de fato ao fim do arquivo.
+- **src/lib/backup/runner.ts** — quando a sessão do Telegram expira no meio do backup, a contagem de arquivos não enviados deixou de somar arquivos que outros envios paralelos já tinham concluído.
+
 ## [0.2.4] — 2026-10-19
 
 ### Adicionado

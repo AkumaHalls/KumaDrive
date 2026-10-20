@@ -1,4 +1,4 @@
-﻿import { Api } from "telegram";
+import { Api } from "telegram";
 import { getClient } from "./client";
 // NOTE: we deliberately do NOT import @tauri-apps/plugin-fs here. Its
 // `open()` is gated by capability scopes (`fs:allow-open` etc.) — those
@@ -12,8 +12,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { withTimeout } from "../storage/metadataStore";
 import { withTelegramRetry } from "./rateLimit";
 
-const CHUNK_SIZE = 512 * 1024; // 512KB recommended chunk size for Telegram
-const CHUNK_TIMEOUT_MS = 20_000;
+/**
+ * Tamanho do chunk enviado por `SaveFilePart`/`SaveBigFilePart`.
+ *
+ * O Telegram recomenda de 512KB a 1MB. Usar 1MB (o teto recomendado)
+ * METADE dos chunks de um arquivo — e, com isso, metade das leituras de
+ * disco, metade das conversões `Uint8Array → Buffer` e metade dos
+ * round-trips de IPC (`read_file_chunk`) e de rede. Num arquivo de 1GB
+ * isso significa ~1024 chunks em vez de ~2048.
+ *
+ * Cuidado: `parts` (o número de partes do arquivo) é derivado daqui e
+ * precisa caber no `int` do MTProto, então não subimos além de 1MB.
+ */
+const CHUNK_SIZE = 1024 * 1024; // 1MB (teto recomendado pelo Telegram)
+// Timeout por chunk. Com chunks de 1MB dobramos o volume por round-trip,
+// então subimos o teto de 20s para 30s — uma pausa de rede não deve
+// abortar um chunk que ainda está progredindo.
+const CHUNK_TIMEOUT_MS = 30_000;
 const SENDFILE_TIMEOUT_MS = 30_000;
 
 interface UploadProgressCallback {
@@ -86,7 +101,9 @@ export async function uploadFileToTelegram(
         // plugin-fs scope restrictions (capability files) which would
         // otherwise reject arbitrary user-picked backup source folders.
         // The Rust side has full filesystem access; we just stream the
-        // requested byte range back as a Vec<u8>.
+        // requested byte range back as a Vec<u8>. O Rust agora mantém um
+        // pool de handles por caminho, então só pagamos `open` uma vez por
+        // arquivo em vez de a cada chunk.
         const rawRes = await invoke<ArrayBuffer | Uint8Array | number[]>("read_file_chunk", {
           path: filePathOrFile as string,
           offset: start,
@@ -201,9 +218,18 @@ export async function uploadFileToTelegram(
     );
     
     return result;
-  } catch (err) {
-    // No file handle to close — we read each chunk via a fresh Rust
-    // command invocation, which has its own open/read/close lifecycle.
-    throw err;
+  } finally {
+    // Libera o handle Rust em cache para o caminho enviado. Sem isto o
+    // pool seguraria um descritor aberto por até CACHED_HANDLE_TTL depois
+    // do arquivo terminar. Só se aplica a entradas por caminho (arquivos
+    // do navegador não passam pelo Rust). Erros são engolidos: isto é
+    // limpeza de recurso, não deve esconder o erro de upload original.
+    if (isPathInput) {
+      try {
+        await invoke("release_file_handles", { paths: [filePathOrFile as string] });
+      } catch {
+        /* limpeza best-effort */
+      }
+    }
   }
 }

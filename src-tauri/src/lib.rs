@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 use serde::{Deserialize, Serialize};
@@ -288,15 +290,143 @@ async fn read_dir_recursive(path: String) -> Result<Vec<DirEntry>> {
     entries
 }
 
+/// Handle de arquivo reutilizável para leitura sequencial de chunks.
+///
+/// Por que existe: o uploader lê um arquivo em chunks de 1MB via
+/// `read_file_chunk`. Sem pool, cada chunk pagava `File::open` + `seek` +
+/// `close` (3 chamadas de sistema) além de um round-trip de IPC. Num
+/// arquivo de 1GB isso eram ~1024 aberturas/seek/close. Guardar o handle
+/// entre chunks deixa só o `seek` + `read` por chunk.
+struct CachedHandle {
+    file: std::fs::File,
+    last_used: Instant,
+}
+
+/// Pool global de handles, chaveado pelo caminho do arquivo.
+static FILE_HANDLES: LazyLock<Mutex<HashMap<String, CachedHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Teto de handles abertos simultaneamente. O uploader de backup roda um
+/// pool de ~3 arquivos concorrentes; 16 dá folga para o upload normal e
+/// para o usuário navegando, sem segurar descritores demais.
+const MAX_CACHED_HANDLES: usize = 16;
+
+/// Um handle ocioso por mais que isto é fechado na próxima faxina.
+/// Evita segurar descritores de arquivos que não voltam a ser lidos.
+const CACHED_HANDLE_TTL: Duration = Duration::from_secs(30);
+
+/// Teto de bytes por chunk. O cliente pede chunks de 1MB; aceitamos até 8MB
+/// de folga, mas recusamos `length` arbitrário — `vec![0u8; length]` com um
+/// `length` vindo do IPC era um OOM trivial (DoS pelo webview).
+const MAX_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Lê `length` bytes em `offset` reutilizando um handle em cache.
+///
+/// Lê em LOOP até preencher `length` ou atingir EOF real. Um `read()` cru
+/// pode devolver um short read mesmo no meio do arquivo (filesystems de
+/// rede, interrupções), e tratar isso como chunk completo enviaria bytes
+/// faltando para o Telegram — corrupção silenciosa. Só o chunk FINAL pode
+/// ser legitimamente menor que `length`.
+fn read_chunk_with_pool(path: &str, offset: u64, length: u64) -> std::result::Result<Vec<u8>, KumaDriveError> {
+    if length == 0 || length > MAX_CHUNK_BYTES {
+        return Err(KumaDriveError::InvalidOperation(format!(
+            "read_file_chunk: length inválido ({length}); esperado 1..={MAX_CHUNK_BYTES}"
+        )));
+    }
+
+    let mut pool = FILE_HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    // Faxina preguiçosa: remove handles ociosos além do TTL.
+    let now = Instant::now();
+    pool.retain(|_, h| now.duration_since(h.last_used) < CACHED_HANDLE_TTL);
+
+    if !pool.contains_key(path) {
+        // Se o pool está cheio, evicta o handle mais antigo (LRU).
+        if pool.len() >= MAX_CACHED_HANDLES {
+            if let Some(oldest) = pool
+                .iter()
+                .min_by_key(|(_, h)| h.last_used)
+                .map(|(k, _)| k.clone())
+            {
+                pool.remove(&oldest);
+            }
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|e| KumaDriveError::ReadFile(format!("open({path}) failed: {e}")))?;
+        pool.insert(
+            path.to_string(),
+            CachedHandle {
+                file,
+                last_used: now,
+            },
+        );
+    }
+
+    let entry = pool
+        .get_mut(path)
+        .ok_or_else(|| KumaDriveError::ReadFile(format!("handle desapareceu do pool: {path}")))?;
+    entry
+        .file
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| KumaDriveError::ReadFile(format!("seek({offset}) failed: {e}")))?;
+    let mut buf = vec![0u8; length as usize];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let n = entry
+            .file
+            .read(&mut buf[filled..])
+            .map_err(|e| KumaDriveError::ReadFile(format!("read({length} @{offset}) failed: {e}")))?;
+        if n == 0 {
+            break; // EOF real — só o chunk final pode ser curto
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    entry.last_used = now;
+    Ok(buf)
+}
+
+/// Fecha e remove do pool os handles dos caminhos informados. O uploader
+/// chama isto quando termina de enviar um arquivo, para não segurar
+/// descritores nem manter o handle obsoleto se o arquivo for trocado.
+fn release_file_handle(path: &str) {
+    // Recupera o guard mesmo se o mutex estiver envenenado (um panic em
+    // outra thread segurando o lock). Sem isto, um único panic deixaria o
+    // pool morto para sempre em silêncio.
+    let mut pool = FILE_HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    pool.remove(path);
+}
+
+#[tauri::command]
+fn release_file_handles(paths: Vec<String>) -> Result<()> {
+    // Lista explícita obrigatória: NÃO aceitamos "limpar tudo" pelo IPC.
+    // Um `None`/lista vazia significaria destruir o pool global a pedido
+    // do frontend — um vetor de DoS trivial (força reabrir todo arquivo em
+    // todo chunk) e acopla subsistemas sem necessidade. O teardown do pool
+    // inteiro acontece pelo lado Rust, não pelo webview.
+    //
+    // Teto de itens: um Vec gigante faria churn do mapa sob o lock — DoS barato.
+    const MAX_RELEASE_BATCH: usize = 256;
+    if paths.len() > MAX_RELEASE_BATCH {
+        return Err(KumaDriveError::InvalidOperation(format!(
+            "release_file_handles: {} caminhos excede o teto de {}",
+            paths.len(),
+            MAX_RELEASE_BATCH
+        )));
+    }
+    for p in paths {
+        release_file_handle(&p);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn read_file_chunk(path: String, offset: u64, length: u64) -> Result<tauri::ipc::Response> {
-    use std::io::{Read, Seek, SeekFrom};
     let path_owned = path.clone();
     tauri::async_runtime::spawn_blocking(move || -> std::result::Result<tauri::ipc::Response, KumaDriveError> {
-        let mut file = std::fs::File::open(&path_owned).map_err(|e| KumaDriveError::ReadFile(format!("open({path_owned}) failed: {e}")))?;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| KumaDriveError::ReadFile(format!("seek({offset}) failed: {e}")))?;
-        let mut buf = vec![0u8; length as usize];
-        file.read_exact(&mut buf).map_err(|e| KumaDriveError::ReadFile(format!("read({length} bytes @{offset}) failed: {e}")))?;
+        let buf = read_chunk_with_pool(&path_owned, offset, length)?;
         Ok::<tauri::ipc::Response, KumaDriveError>(tauri::ipc::Response::new(buf))
     })
     .await
@@ -410,6 +540,7 @@ pub fn run() {
             load_backup_config,
             read_dir_recursive,
             read_file_chunk,
+            release_file_handles,
             write_file_binary,
             write_file_chunk,
             open_file_in_system_viewer,
