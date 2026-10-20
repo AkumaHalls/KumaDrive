@@ -10,7 +10,7 @@
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
 [![Всего загрузок](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
-[![Последняя версия](https://img.shields.io/badge/релиз-v0.2.6-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
+[![Последняя версия](https://img.shields.io/badge/релиз-v0.2.8-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![Демо на YouTube](https://img.shields.io/badge/YouTube-Видео%20Демо-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![Лицензия: GPL v3](https://img.shields.io/badge/лицензия-GPLv3-gray.svg?style=flat-square)](../LICENSE)
 [![Звезды на GitHub](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
@@ -53,7 +53,7 @@ Telegram предоставляет практически неограниче�
 
 ## 📥 Скачать
 
-Текущий релиз: **v0.2.6** · Готовые бинарные сборки для всех основных операционных систем:
+Текущий релиз: **v0.2.8** · Готовые бинарные сборки для всех основных операционных систем:
 
 | Операционная система | Формат пакета | Прямая ссылка | Размер |
 |:---|:---|:---|---:|

@@ -225,6 +225,16 @@ class ChannelQueue {
    */
   private resumeCommitError: any = null;
   /**
+   * Message ids que acabamos de criar via `sendMessage` no fallback, com
+   * seus prazos de expiração (ms desde a epoch). O Telegram restringe a
+   * EDIÇÃO de uma mensagem por uma janela depois do envio (406:
+   * EDIT_MESSAGE_TEMP_RESTRICTED) — e tentar editar custa o timeout
+   * inteiro (8 s por chunk). Com este mapa, `commitOnce` pula a edição e
+   * vai direto ao fallback quando o alvo é uma mensagem recém-enviada.
+   * Portado do Teledrive original (senapati484/teledrive).
+   */
+  private recentSentMessageIds: Map<number, number> = new Map();
+  /**
    * Contador de suspensões de commit. Enquanto > 0, `enqueue` guarda o
    * estado pendente mas NÃO drena — o índice só é gravado quando o
    * contador volta a 0 (ver `resume()`).
@@ -288,6 +298,42 @@ class ChannelQueue {
         throw this.resumeCommitError;
       }
     }
+  }
+
+  /**
+   * Registra que `messageId` acabou de ser criado por um fallback
+   * `sendMessage`. `commitOnce` se recusa a editá-lo pelos próximos
+   * `windowMs` milissegundos — o Telegram devolveria
+   * EDIT_MESSAGE_TEMP_RESTRICTED depois de queimar o timeout inteiro.
+   */
+  private markRecentlySent(messageId: number, windowMs: number = 60_000): void {
+    // Poda ao marcar: o prune também roda em hasRecentlySent, mas se o
+    // canal só RECEBE commits (sem epoch coerente prévia), o mapa ficava
+    // cheio de ids expirados até a próxima checagem de edição.
+    this.pruneRecentlySent();
+    this.recentSentMessageIds.set(messageId, Date.now() + windowMs);
+  }
+
+  /** Remove entradas expiradas, para o mapa não crescer para sempre. */
+  private pruneRecentlySent(): void {
+    const now = Date.now();
+    for (const [id, expiresAt] of this.recentSentMessageIds) {
+      if (expiresAt <= now) this.recentSentMessageIds.delete(id);
+    }
+  }
+
+  /**
+   * True se ALGUM dos ids dados ainda está na janela de recém-enviado.
+   * `commitOnce` usa isto para decidir entre editar no lugar e cair no
+   * fallback.
+   */
+  private hasRecentlySent(messageIds: number[]): boolean {
+    if (messageIds.length === 0) return false;
+    this.pruneRecentlySent();
+    for (const id of messageIds) {
+      if (this.recentSentMessageIds.has(id)) return true;
+    }
+    return false;
   }
 
   enqueue(state: TeleFile[]): Promise<void> {
@@ -360,6 +406,10 @@ class ChannelQueue {
     // o índice nunca mais gravaria neste canal até reiniciar o app. O flush
     // é exatamente onde esse estado acumulado deve ser descartado.
     this.suspendCount = 0;
+    // A janela de recém-enviados também é estado de ciclo: no próximo
+    // login a epoch pode ter sido trocada por outro dispositivo, e ids
+    // antigos não devem fazer o commit pular a edição.
+    this.recentSentMessageIds.clear();
     this.updateStoreState();
   }
 
@@ -713,12 +763,12 @@ class ChannelQueue {
     // Pick the coherent set of chunks that represents the current state of
     // the index.
     //
-    // ATENÇÃO, pós-remoção do caminho de edição: `coherentSet` e `existing`
-    // abaixo NÃO são mais o alvo de exclusão. O delete do passo 3 usa
-    // `allMsgs` inteiro (qualquer chunk de índice que não seja recém-enviado).
-    // `existing` sobrevive apenas para o log INDEX_EXISTING_FOUND/NONE, que é
-    // o que faz um diagnóstico de "por que este commit reescreveu tudo"
-    // distinguir "já existia epoch coerente" de "era a primeira gravação".
+    // `existing` (a epoch coerente atual) tem DOIS papéis: é o ALVO da
+    // edição-in-place do passo 2 abaixo (quando a contagem de chunks bate)
+    // e alimenta o log INDEX_EXISTING_FOUND/NONE. O delete do passo 4
+    // continua usando `allMsgs` inteiro — QUALQUER chunk de índice que não
+    // seja recém-enviado — para limpar também lixo de epochs antigas que
+    // um delete falhou em apagar.
     const coherentSet: ParsedIndexChunk[] | null = pickCoherentIndexSet(allMsgs);
 
     // Map back from msgId → original Telegram message object, used only
@@ -743,38 +793,276 @@ class ChannelQueue {
       }).catch(() => {});
     }
 
-    // 2. SEND-FIRST, DELETE-LATER — esta é a decisão de atomicidade do
-    //    índice inteiro, e ela inverte a ordem anterior (apagar-antes-de-
-    //    enviar).
+    // 2. EDIÇÃO-IN-PLACE (caminho feliz — portado de volta do Teledrive
+    //    original, senapati484/teledrive).
     //
-    //    Por que a ordem antiga perdia dados: ela APAGAVA os chunks velhos
-    //    e depois enviava os novos. Se o envio falhasse no chunk k de N
-    //    (FLOOD_WAIT, timeout, processo morto), o canal ficava com uma
-    //    epoch INCOMPLETA e nada mais. `pickCoherentIndexSet` não achava
-    //    epoch coerente, `loadIndex` caía no merge best-effort — e
-    //    `healAndSave` GRAVAVA esse set truncado de volta. Uma falha
-    //    transitória virava perda permanente de ~40% dos arquivos.
+    //    Se já existe uma epoch coerente com a MESMA contagem de chunks,
+    //    editamos as mensagens no lugar. É a "essência" que este fork tinha
+    //    perdido: sem este caminho, TODO commit de índice custava N sends
+    //    + N pins + N deletes — e eram exatamente sends/pins que o
+    //    Telegram bloqueia com FLOOD_WAIT (evidência de campo: pins
+    //    chegaram a 884 s). Com a edição, um salvar/renomear/mover custa
+    //    N edits baratos, zero mensagens novas, zero pins, zero deletes.
     //
-    //    Por que enviar-primeiro é seguro: `pickCoherentIndexSet` escolhe
-    //    a epoch completa com a msgId MAIS ALTA, e msgId do Telegram é
-    //    estritamente crescente. Logo:
+    //    Quando editamos:
+    //      a) contagem de chunks idêntica. Renomear/mover/estrelar/arquivar
+    //         não muda a contagem (ações interativas, as mais frequentes);
+    //         adicionar/remover arquivo muda e cai no fallback (caso raro
+    //         no uso diário).
+    //      b) nenhuma das mensagens-alvo foi enviada por nós nos últimos
+    //         60 s: o Telegram restringe edição de mensagem recém-enviada
+    //         (406: EDIT_MESSAGE_TEMP_RESTRICTED) e cada tentativa queima
+    //         8 s de timeout POR CHUNK. Melhor cair direto no fallback,
+    //         que converge em 1 round-trip por chunk.
+    //      c) se QUALQUER edit falhar no meio, caímos no fallback
+    //         send-first do passo 3 — que reenvia a epoch inteira e só
+    //         depois apaga a velha.
     //
-    //      - envio parcial → a epoch nova está INCOMPLETA → é ignorada →
-    //        a epoch velha (completa) continua sendo a fonte da verdade.
-    //        Nada se perde, e o retry reconstrói.
-    //      - envio completo → a epoch nova tem msgIds maiores → vence.
-    //        Só ENTÃO apagamos a velha.
-    //      - falha no delete → epoch velha sobra como lixo, mas continua
-    //        perdendo a comparação por msgId. Lixo, não corrupção.
+    //    O risco que motivou a remoção histórica deste caminho (b5ea453):
+    //    um edit que falha no chunk k deixa 0..k com conteúdo novo e
+    //    k+1..N com velho — um "Frankenstein" estruturalmente coerente.
+    //    Por que isso é aceitável (e é o que o Teledrive original faz em
+    //    campo sem problemas):
+    //      - a janela é TRANSITÓRIA: a fila retenta o commit inteiro e
+    //        reedita TODOS os chunks com o estado mais recente — converge;
+    //      - se cairmos no fallback, ele é SEND-FIRST: a epoch mista só é
+    //        apagada DEPOIS que a nova completa já existe no canal;
+    //      - conteúdo misto afeta no máximo a VISÃO de alguns arquivos
+    //        até o próximo commit — os arquivos em si são mensagens no
+    //        Telegram e o manifesto do backup é gravado por arquivo;
+    //        heal/orphan-scan corrige qualquer desvio no próximo load.
+    //      - e o custo da alternativa (N sends + pins + deletes por ação
+    //        interativa) é justamente o que PROVOCOU o flood em campo.
+    const existingIds = existing.map((m: any) => Number(m.id));
+    const canEdit =
+      existing.length > 0 &&
+      existing.length === chunks.length &&
+      !this.hasRecentlySent(existingIds);
+    // Ids da epoch viva DEPOIS deste commit: os msgIds editados (caminho
+    // de edição) ou os recém-enviados (fallback). O passo 4 usa isto para
+    // saber o que NÃO apagar — a limpeza é compartilhada pelos dois
+    // caminhos, então o `return` cedo do edit não pode deixar lixo
+    // acumular (H1/M2 da revisão).
+    let keepIdSet: Set<number> | null = null;
+    if (existing.length > 0 && !canEdit) {
+      // Loga POR QUE pulamos a edição. Sem isto, um diagnóstico de
+      // "reescreveu tudo" não distingue restrição temporária de mudança
+      // estrutural (que o fallback de qualquer forma precisa cobrir).
+      const reason = this.hasRecentlySent(existingIds)
+        ? "recently_sent"
+        : `chunk_count_mismatch existing=${existing.length} new=${chunks.length}`;
+      await invoke("log_vault_state", {
+        state: `INDEX_EDIT_SKIP reason=${reason}`,
+      }).catch(() => {});
+    }
+    if (canEdit) {
+      let allEditsOk = true;
+      for (let i = 0; i < chunks.length; i++) {
+        const payload = {
+          kumadrive_index: true,
+          version: 1,
+          chunkIndex: i,
+          totalChunks: chunks.length,
+          files: chunks[i],
+        };
+        const text = JSON.stringify(payload);
+        try {
+          await withTimeout(
+            client.editMessage(peer, {
+              message: existing[i]?.id,
+              text,
+            }),
+            EDIT_TIMEOUT_MS,
+            `editMessage(chunk ${i})`
+          );
+        } catch (err: any) {
+          // Um único edit que falhou: cai no fallback para TODOS os
+          // chunks. A epoch mista que fica para trás é apagada pelo
+          // passo 4 depois que a nova completa existir.
+          allEditsOk = false;
+          await invoke("log_vault_state", {
+            state: `INDEX_EDIT_FAIL chunk=${i} reason=${err?.message ?? err}`,
+          }).catch(() => {});
+          break;
+        }
+      }
+      if (allEditsOk) {
+        // msgIds truncados (primeiro 4 + total): o vault_state.log é colado
+        // em bug reports (CONTRIBUTING), então listas inteiras de ids não
+        // precisam ir para o disco — 4 bastam para diagnosticar alinhamento
+        // de chunk e a contagem dá a magnitude.
+        const idList =
+          existingIds.length > 4
+            ? `${existingIds.slice(0, 4).join(",")} +${existingIds.length - 4}`
+            : existingIds.join(",");
+        await invoke("log_vault_state", {
+          state: `INDEX_EDIT_OK chunks=${chunks.length} files=${state.length} msgIds=[${idList}]`,
+        }).catch(() => {});
+        // Não retornamos aqui: o fluxo segue para o passo 4, que apaga
+        // qualquer chunk de índice em `allMsgs` que NÃO pertença à epoch
+        // viva que acabamos de editar. O `return` cedo deixaria lixo de
+        // epochs órfãs acumular para sempre no caminho feliz — lixo infla
+        // a janela de `getMessages(recent, limit=200)` até empurrar a
+        // epoch viva para fora dela, e uma epoch MISTA deixada por um
+        // edit parcial nunca seria limpa (o próximo commit feliz também
+        // só edita). No caso comum a limpeza é 0 itens — custo ~zero.
+        keepIdSet = new Set(existingIds);
+      } else {
+        await invoke("log_vault_state", {
+          state: "INDEX_FALLBACK_SEND reason=edit_failed",
+        }).catch(() => {});
+      }
+    }
+
+    // 3. SEND-FIRST (fallback) — só roda quando a edição não aconteceu
+    //    (não havia epoch, a contagem de chunks mudou, restrição
+    //    temporária de mensagem recém-enviada, ou um edit falhou no
+    //    meio). A decisão de atomicidade — enviar a epoch nova completa
+    //    ANTES de apagar a velha, invertendo a ordem do Teledrive
+    //    original — está documentada em `sendEpochFresh`.
+    if (keepIdSet === null) {
+      const newMsgIds = await this.sendEpochFresh(client, peer, chunks);
+      keepIdSet = new Set(newMsgIds);
+    }
+
+    // Invariante de fluxo: um dos dois caminhos acima SEMPRE atribui
+    // `keepIdSet` antes de chegar aqui (edição bem-sucedida ou envio
+    // completo). Se algum dia um terceiro caminho surgir, parar aqui com
+    // log é melhor do que deixar a limpeza rodar sem saber o que
+    // preservar — apagar a epoch viva por acidente seria catastrófico.
+    if (!keepIdSet) {
+      await invoke("log_vault_state", {
+        state: "INDEX_CLEANUP_SKIP reason=no_keep_ids",
+      }).catch(() => {});
+      return;
+    }
+
+    // 4. A epoch viva está completa no Telegram (recém-EDITADA no lugar, ou
+    //    recém-ENVIADA pelo fallback). Agora sim apagamos os chunks
+    //    antigos — inclusive os de epochs velhas órfãs que um delete
+    //    falhado deixou para trás. A correção aqui também limpa o lixo:
+    //    apagamos QUALQUER mensagem de índice em `allMsgs` que não
+    //    pertença à epoch viva (`keepIdSet`).
     //
-    //    Este mesmo raciocínio torna o antigo caminho de EDIÇÃO-in-place
-    //    desnecessário (e foi removido). Ele editava os chunks no MESMO
-    //    msgId: um edit que falhava no chunk 2 deixava chunks 0-1 com
-    //    conteúdo novo e 2-3 com velho, todos com totalChunks/chunkIndex
-    //    coerentes — e `findMostRecentCoherentEpoch` aceitava aquele
-    //    Frankenstein como uma epoch completa e válida. Não há como
-    //    "desfazer" um edit no Telegram, então aquele caminho não tinha
-    //    como convergir sozinho.
+    //    Filtro EXATO, não substring. `.text` de uma mensagem de mídia é
+    //    o CAPTION (GramJS message.js: `get text() { return this.message }`),
+    //    e o caption de arquivo é `kumadrive_file:{"folder":"..."}`.
+    //    Com `includes("kumadrive_index")` — erro que o código deste
+    //    commit já cometeu numa revisão anterior —
+    //    um usuário que criasse uma pasta chamada "kumadrive_index" e
+    //    subisse um arquivo nela teria o msgId DELE incluído em
+    //    `staleIds` a cada commit, e o `deleteMessages(..., {revoke:true})`
+    //    apagaria os BYTES do arquivo do Telegram. O índice continuaria
+    //    referenciando aquele messageId: arquivo visível na UI, 404 no
+    //    download, perda permanente.
+    //
+    //    Exigimos o prefixo EXATO do payload de índice. `JSON.stringify`
+    //    produz `{"kumadrive_index":true,...` (chave numerada primeiro,
+    //    sem espaços), então este prefixo só casa com chunks reais:
+    //      - caption de arquivo  → `kumadrive_file:{...}`        não casa
+    //      - pasta "kumadrive_index" com arquivo dentro → caption é
+    //        `kumadrive_file:{"folder":"kumadrive_index"}`       não casa
+    //    `parseIndexMessages` continua protegido pelo `JSON.parse`; o
+    //    delete agora também tem garantia de identidade.
+    const newIdSet = keepIdSet;
+    const staleIds = allMsgs
+      .filter(
+        (m: any) =>
+          m?.id != null && typeof m?.text === "string" && isIndexChunkText(m.text)
+      )
+      .map((m: any) => Number(m.id))
+      .filter((id: number) => Number.isFinite(id) && !newIdSet.has(id));
+
+    if (staleIds.length > 0) {
+      let deleteOk = false;
+      let lastDeleteErr: any = null;
+      // Distingue o FLOOD_WAIT engolido do give-up de erro normal no log
+      // final — sem isto o mesmo evento gerava DOIS logs
+      // (INDEX_DELETE_OLD_FLOOD_WAIT swallowed + INDEX_DELETE_OLD_GIVE_UP),
+      // deixando o diagnóstico ambíguo.
+      let floodWaitSwallowed = false;
+      for (let attempt = 1; attempt <= 3 && !deleteOk; attempt++) {
+        try {
+          await withTimeout(
+            client.deleteMessages(peer, staleIds, { revoke: true }),
+            DELETE_TIMEOUT_MS,
+            `deleteMessages(stale attempt=${attempt})`
+          );
+          deleteOk = true;
+        } catch (err: any) {
+          lastDeleteErr = err;
+          await invoke("log_vault_state", {
+            state: `INDEX_DELETE_OLD_FAIL attempt=${attempt} reason=${err?.message ?? err}`,
+          }).catch(() => {});
+          // FLOOD_WAIT aqui NÃO pode lançar, e é o ponto sutil desta
+          // versão. A epoch viva JÁ está completa (editada no lugar ou
+          // enviada com msgIds maiores — o passo 3 só roda depois de
+          // INDEX_EDIT_OK/INDEX_SEND_OK). Lançar faria a fila
+          // reenviar a epoch INTEIRA por causa do LIXO — n×send + n×pin
+          // ×5 tentativas, estourando o cap — e o `enqueueSave`
+          // rejeitaria, fazendo o `applyOptimistic` DESFAZER na UI uma
+          // ação que já está gravada no Telegram. Daí a próxima ação
+          // gravaria o estado revertido: um "undo" fantasma.
+          //
+          // O commit corrente depende só de a epoch viva estar íntegra,
+          // o que o passo anterior já garantiu. Lixo que sobra perde
+          // a seleção por msgId — nunca corrupção. Então engolimos.
+          if (parseFloodWaitSeconds(err) != null) {
+            floodWaitSwallowed = true;
+            await invoke("log_vault_state", {
+              state: `INDEX_DELETE_OLD_FLOOD_WAIT swallowed count=${staleIds.length} err=${err?.message ?? err}`,
+            }).catch(() => {});
+            break;
+          }
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 500 * attempt));
+          }
+        }
+      }
+      await invoke("log_vault_state", {
+        state: deleteOk
+          ? `INDEX_DELETE_OLD_OK count=${staleIds.length}`
+          : floodWaitSwallowed
+          ? `INDEX_DELETE_OLD_PENDING count=${staleIds.length} reason=flood_wait lixo fica para o próximo commit`
+          : `INDEX_DELETE_OLD_GIVE_UP count=${staleIds.length} err=${lastDeleteErr?.message ?? lastDeleteErr}`,
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * Passo 3 do commitOnce (fallback send-first): envia a epoch nova
+   * completa ANTES de apagar a velha — esta é a decisão de atomicidade do
+   * índice inteiro, e ela inverte a ordem do Teledrive original
+   * (apagar-antes-de-enviar).
+   *
+   * Por que a ordem deles perde dados: ela APAGAVA os chunks velhos e
+   * depois enviava os novos. Se o envio falhasse no chunk k de N
+   * (FLOOD_WAIT, timeout, processo morto), o canal ficava com uma epoch
+   * INCOMPLETA e nada mais. `pickCoherentIndexSet` não achava epoch
+   * coerente, `loadIndex` caía no merge best-effort — e `healAndSave`
+   * GRAVAVA esse set truncado de volta. Uma falha transitória virava
+   * perda permanente de ~40% dos arquivos.
+   *
+   * Por que enviar-primeiro é seguro: `pickCoherentIndexSet` escolhe a
+   * epoch completa com a msgId MAIS ALTA, e msgId do Telegram é
+   * estritamente crescente. Logo:
+   *
+   *   - envio parcial → a epoch nova está INCOMPLETA → é ignorada → a
+   *     epoch velha (completa) continua sendo a fonte da verdade. Nada
+   *     se perde, e o retry reconstrói.
+   *   - envio completo → a epoch nova tem msgIds maiores → vence. Só
+   *     ENTÃO o passo 4 do commitOnce apaga a velha.
+   *   - falha no delete → epoch velha sobra como lixo, mas continua
+   *     perdendo a comparação por msgId. Lixo, não corrupção.
+   *
+   * Lança em qualquer falha de envio — commitOnce deixa a exceção ser
+   * classificada como transient/hard pela fila, como sempre foi.
+   */
+  private async sendEpochFresh(
+    client: any,
+    peer: any,
+    chunks: TeleFile[][]
+  ): Promise<number[]> {
     const newMsgIds: number[] = [];
     for (let i = 0; i < chunks.length; i++) {
       const payload = {
@@ -795,6 +1083,19 @@ class ChannelQueue {
         );
         msgId = Number((result as any).id);
         newMsgIds.push(msgId);
+        // Marca como recém-enviado: pelo próximo minuto o Telegram recusaria
+        // a EDIÇÃO destas mensagens (406: EDIT_MESSAGE_TEMP_RESTRICTED), e
+        // tentar editá-las queimaria 8 s de timeout por chunk. Com a marca,
+        // o próximo commit pula a edição e vai direto ao fallback.
+        //
+        // Sobre a "cascata" (commit após commit caindo no fallback dentro
+        // da janela de 60 s): é o comportamento do Teledrive original e é
+        // LIMITADO — a fila COALESCES ações rápidas num único commit
+        // pendente, então uma rajada de ações vira 1-2 fallbacks, não N.
+        // E o cenário só existe quando a estrutura mudou (upload novo) ou
+        // logo após um fallback — renomear/mover >60 s depois de qualquer
+        // envio segue pelo caminho de edição barato.
+        this.markRecentlySent(msgId);
       } catch (err) {
         throw err;
       }
@@ -841,96 +1142,12 @@ class ChannelQueue {
     }
 
     await invoke("log_vault_state", {
-      state: `INDEX_SEND_OK chunks=${chunks.length} files=${state.length} msgIds=[${newMsgIds.join(",")}]`,
+      state: `INDEX_SEND_OK chunks=${chunks.length} files=${chunks.reduce(
+        (n, c) => n + c.length,
+        0
+      )} msgIds=[${newMsgIds.join(",")}]`,
     }).catch(() => {});
-
-    // 3. TODA a epoch nova está no Telegram. Agora sim apagamos os chunks
-    //    antigos — inclusive os de epochs velhas órfãs que um delete
-    //    falhado deixou para trás. A correção aqui também limpa o lixo:
-    //    apagamos QUALQUER mensagem de índice em `allMsgs` que não seja
-    //    uma das que acabamos de enviar.
-    //
-    //    Filtro EXATO, não substring. `.text` de uma mensagem de mídia é
-    //    o CAPTION (GramJS message.js: `get text() { return this.message }`),
-    //    e o caption de arquivo é `kumadrive_file:{"folder":"..."}`.
-    //    Com `includes("kumadrive_index")` — como escrevi nesta versão —
-    //    um usuário que criasse uma pasta chamada "kumadrive_index" e
-    //    subisse um arquivo nela teria o msgId DELE incluído em
-    //    `staleIds` a cada commit, e o `deleteMessages(..., {revoke:true})`
-    //    apagaria os BYTES do arquivo do Telegram. O índice continuaria
-    //    referenciando aquele messageId: arquivo visível na UI, 404 no
-    //    download, perda permanente.
-    //
-    //    Exigimos o prefixo EXATO do payload de índice. `JSON.stringify`
-    //    produz `{"kumadrive_index":true,...` (chave numerada primeiro,
-    //    sem espaços), então este prefixo só casa com chunks reais:
-    //      - caption de arquivo  → `kumadrive_file:{...}`        não casa
-    //      - pasta "kumadrive_index" com arquivo dentro → caption é
-    //        `kumadrive_file:{"folder":"kumadrive_index"}`       não casa
-    //    `parseIndexMessages` continua protegido pelo `JSON.parse`; o
-    //    delete agora também tem garantia de identidade.
-    const newIdSet = new Set(newMsgIds);
-    const staleIds = allMsgs
-      .filter(
-        (m: any) =>
-          m?.id != null && typeof m?.text === "string" && isIndexChunkText(m.text)
-      )
-      .map((m: any) => Number(m.id))
-      .filter((id: number) => Number.isFinite(id) && !newIdSet.has(id));
-
-    if (staleIds.length > 0) {
-      let deleteOk = false;
-      let lastDeleteErr: any = null;
-      // Distingue o FLOOD_WAIT engolido do give-up de erro normal no log
-      // final — sem isto o mesmo evento gerava DOIS logs
-      // (INDEX_DELETE_OLD_FLOOD_WAIT swallowed + INDEX_DELETE_OLD_GIVE_UP),
-      // deixando o diagnóstico ambíguo.
-      let floodWaitSwallowed = false;
-      for (let attempt = 1; attempt <= 3 && !deleteOk; attempt++) {
-        try {
-          await withTimeout(
-            client.deleteMessages(peer, staleIds, { revoke: true }),
-            DELETE_TIMEOUT_MS,
-            `deleteMessages(stale attempt=${attempt})`
-          );
-          deleteOk = true;
-        } catch (err: any) {
-          lastDeleteErr = err;
-          await invoke("log_vault_state", {
-            state: `INDEX_DELETE_OLD_FAIL attempt=${attempt} reason=${err?.message ?? err}`,
-          }).catch(() => {});
-          // FLOOD_WAIT aqui NÃO pode lançar, e é o ponto sutil desta
-          // versão. O envio da epoch nova JÁ terminou (o passo acima só
-          // roda depois de `INDEX_SEND_OK`). Lançar faria o queue
-          // reenviar a epoch INTEIRA por causa do LIXO — n×send + n×pin
-          // ×5 tentativas, estourando o cap — e o `enqueueSave`
-          // rejeitaria, fazendo o `applyOptimistic` DESFAZER na UI uma
-          // ação que já está gravada no Telegram. Daí a próxima ação
-          // gravaria o estado revertido: um "undo" fantasma.
-          //
-          // A correção do commit depende só de a epoch nova ter msgId
-          // maior, o que o envio acima já garantiu. Lixo que sobra perde
-          // a seleção por msgId — nunca corrupção. Então engolimos.
-          if (parseFloodWaitSeconds(err) != null) {
-            floodWaitSwallowed = true;
-            await invoke("log_vault_state", {
-              state: `INDEX_DELETE_OLD_FLOOD_WAIT swallowed count=${staleIds.length} err=${err?.message ?? err}`,
-            }).catch(() => {});
-            break;
-          }
-          if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 500 * attempt));
-          }
-        }
-      }
-      await invoke("log_vault_state", {
-        state: deleteOk
-          ? `INDEX_DELETE_OLD_OK count=${staleIds.length}`
-          : floodWaitSwallowed
-          ? `INDEX_DELETE_OLD_PENDING count=${staleIds.length} reason=flood_wait lixo fica para o próximo commit`
-          : `INDEX_DELETE_OLD_GIVE_UP count=${staleIds.length} err=${lastDeleteErr?.message ?? lastDeleteErr}`,
-      }).catch(() => {});
-    }
+    return newMsgIds;
   }
 }
 

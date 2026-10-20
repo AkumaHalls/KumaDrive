@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -335,7 +335,7 @@ export function FileBrowser({ folderPath = "/", mode = "drive", searchQuery = ""
 
   // Compute ONLY the slice that the current `mode` actually needs.
 // Previously this allocated four filtered arrays eagerly (starred/recent/
-// archived/trash) on every render, costing 3Ã—O(N) wasted work when only
+// archived/trash) on every render, costing 3×O(N) wasted work when only
 // one of them was being read by `displayFiles`. Now we compute exactly
 // one slice — and we only pay for folderEntriesIndex.get(folderPath) when
 // the user is on a drive/folder view.

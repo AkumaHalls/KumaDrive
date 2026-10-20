@@ -480,7 +480,7 @@ export default function BackupSection() {
       {/* Footer explainer callout */}
       <div className="flex items-start sm:items-center gap-3.5 justify-between flex-wrap p-4 rounded-2xl bg-slate-50 dark:bg-[#282A2C]/50 border border-slate-200/70 dark:border-slate-800 text-xs text-[#444746] dark:text-[#C4C7C5] leading-relaxed">
         <div className="flex items-start gap-2.5 flex-1 min-w-[220px]">
-          <span className="text-base select-none mt-0.5">ðŸ’¡</span>
+          <span className="text-base select-none mt-0.5">💡</span>
           <span>
             <strong>Como funciona o backup:</strong> o KumaDrive percorre as pastas que você escolher, compara com um manifesto local e envia apenas os arquivos novos ou alterados.
           </span>

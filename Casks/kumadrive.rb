@@ -1,5 +1,5 @@
 cask "kumadrive" do
-  version "0.2.7"
+  version "0.2.8"
   sha256 :no_check
 
   url "https://github.com/AkumaHalls/KumaDrive/releases/latest/download/KumaDrive_universal.dmg",

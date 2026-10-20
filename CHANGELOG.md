@@ -5,6 +5,16 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.8] — 2026-10-20
+
+### Corrigido
+- **src/lib/storage/indexQueue.ts** — o KumaDrive tinha perdido o caminho de *edição* do índice herdado do Teledrive original: salvar, renomear, mover ou favoritar um arquivo reenviava o índice inteiro (dezenas de mensagens novas + fixações + exclusões), quando deveria apenas **editar as mensagens existentes no lugar** — que é exatamente o comportamento do Teledrive original e a razão de ele ser mais fluido no uso diário. A edição está de volta: ações que não mudam a estrutura do índice agora custam apenas N edições leves, sem mensagens novas, sem fixações e sem exclusões. Quando a estrutura muda (arquivo adicionado ou removido) ou uma mensagem acabou de ser enviada (o Telegram proíbe editar mensagem nova por ~1 minuto), o commit cai no caminho antigo de reenvio seguro — enviar tudo primeiro, apagar depois — que já provou não perder dados. A limpeza de mensagens órfãs também passou a rodar nos dois caminhos, então o canal não acumula lixo de índice.
+- **src/components/settings/BackupSection.tsx** e **AppearanceSection.tsx** — o símbolo de lâmpada das explicações "Como funciona o backup" e "Sincronização do tema" aparecia como caracteres corrompidos ("ðŸ'¡") por um erro de dupla codificação; agora exibe 💡 corretamente. Um caso igual num comentário interno do FileBrowser também foi corrigido.
+- **locales/README-*.md** — os seis READMEs traduzidos ainda apontavam a versão v0.2.6 (o bump da v0.2.7 passou batido neles); agora apontam v0.2.8.
+
+### Observação sobre o comportamento do backup
+Durante o backup de pastas o índice continua **suspenso** e é gravado uma única vez ao final — por isso você não vê mensagens sendo enviadas e fixadas no canal durante o backup (diferente do Teledrive original). Isso é intencional: é justamente o que corta a maior fonte de bloqueio do Telegram e mantém o backup rápido. As mensagens continuam subindo normalmente, arquivo por arquivo.
+
 ## [0.2.7] — 2026-10-20
 
 ### Corrigido

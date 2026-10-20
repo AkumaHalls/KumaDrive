@@ -1,4 +1,4 @@
-﻿import { Sun, Moon, Laptop, Check } from "lucide-react";
+import { Sun, Moon, Laptop, Check } from "lucide-react";
 import { useUIStore } from "@/stores/uiStore";
 import { cn } from "@/lib/utils";
 
@@ -129,7 +129,7 @@ export default function AppearanceSection() {
 
       {/* Info Callout */}
       <div className="p-4 rounded-2xl bg-[#F0F4F9] dark:bg-[#282A2C] border border-slate-200/60 dark:border-slate-700/60 text-xs text-[#444746] dark:text-[#C4C7C5] leading-relaxed">
-        ðŸ’¡ <strong>Sincronização do tema:</strong> O KumaDrive usa as cores HSL do Google Drive tanto nas superfícies claras (`#F8FAFD`) quanto nas escuras (`#131314`), garantindo alto contraste e menos cansaço visual.
+        💡 <strong>Sincronização do tema:</strong> O KumaDrive usa as cores HSL do Google Drive tanto nas superfícies claras (`#F8FAFD`) quanto nas escuras (`#131314`), garantindo alto contraste e menos cansaço visual.
       </div>
     </div>
   );

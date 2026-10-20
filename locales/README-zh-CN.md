@@ -10,7 +10,7 @@
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
 [![总下载量](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
-[![最新版本](https://img.shields.io/badge/版本-v0.2.6-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
+[![最新版本](https://img.shields.io/badge/版本-v0.2.8-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![YouTube 演示视频](https://img.shields.io/badge/YouTube-演示视频-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![开源协议: GPL v3](https://img.shields.io/badge/开源协议-GPLv3-gray.svg?style=flat-square)](../LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
@@ -53,7 +53,7 @@ Telegram 在私人频道中提供了几乎无限的免费云存储空间，但�
 
 ## 📥 下载
 
-当前最新版本：**v0.2.6** · 全平台预编译原生安装包：
+当前最新版本：**v0.2.8** · 全平台预编译原生安装包：
 
 | 操作系统 | 安装包格式 | 直接下载链接 | 大小 |
 |:---|:---|:---|---:|
