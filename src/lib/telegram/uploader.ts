@@ -34,6 +34,66 @@ const CHUNK_SIZE = 1024 * 1024; // 1MB (teto recomendado pelo Telegram)
 const CHUNK_TIMEOUT_MS = 30_000;
 const SENDFILE_TIMEOUT_MS = 30_000;
 
+/**
+ * Limite de arquivo de conta gratuita do Telegram: 2 GB.
+ *
+ * O limite é do PRÓPRIO Telegram (documento anexado a mensagem) — nenhum
+ * app cliente pode contorná-lo. Em bytes usamos 2 GiB (2_147_483_648),
+ * o valor conservador: só rejeitamos arquivos que certamente não passam.
+ */
+const TELEGRAM_FREE_FILE_LIMIT = 2 * 1024 * 1024 * 1024;
+/**
+ * Limite absoluto, inclusive contas Premium: 4 GB. Acima disto o Telegram
+ * recusa o upload SEM responder ao `SaveBigFilePart` — e cada tentativa
+ * custa 3×30s de timeout enquanto martela a sessão. Evidência de campo:
+ * um arquivo de 9,4 GB (18.401 partes) foi tentado em todos os backups,
+ * falhava em ~90s e somava pressão de escrita na sessão que já estava
+ * penalizada. O Teledrive original não tem esta guarda — o KumaDrive sim.
+ */
+const TELEGRAM_PREMIUM_FILE_LIMIT = 4 * 1024 * 1024 * 1024;
+
+/** Formato amigável de GB para as mensagens de erro. */
+function gb(size: number): string {
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/**
+ * Memo (por instância de app) da flag Premium da conta logada.
+ *
+ * `getMe()` no GramJS é barato e cacheado após a primeira chamada, mas
+ * evitamos repeti-lo por arquivo: um backup com centenas de arquivos não
+ * precisa reconsultar. Se a consulta falhar, assumimos NÃO-Premium — o
+ * lado seguro (recusa arquivos de 2-4 GB com mensagem clara em vez de
+ * desperdiçar o upload inteiro para o Telegram recusar no final).
+ */
+let cachedAccountPremium: boolean | null = null;
+async function accountHasPremium(client: any): Promise<boolean> {
+  if (cachedAccountPremium !== null) return cachedAccountPremium;
+  try {
+    const me = await client.getMe();
+    cachedAccountPremium = (me as any)?.premium === true;
+  } catch {
+    // Falha da consulta NÃO memoiza: a próxima chamada consulta de novo.
+    // Assumir não-Premium APENAS agora é o lado seguro — recusa o arquivo
+    // de 2-4 GB com mensagem clara em vez de condenar a sessão inteira a
+    // recusar até um getMe futuro dar certo.
+    return false;
+  }
+  return cachedAccountPremium;
+}
+
+/**
+ * Zera o memo de Premium da conta. Chamado no logout/desconexão: o memo é
+ * da CONTA logada, e trocar de conta (sair de uma Premium, entrar numa
+ * gratuita, ou o contrário) sem zerar deixaria a flag stale — no pior
+ * caso, liberando um arquivo de 3 GB numa conta gratuita (que gastaria o
+ * upload inteiro para o Telegram recusar no final, o timeout que esta
+ * guarda existe para evitar).
+ */
+export function resetAccountPremiumCache(): void {
+  cachedAccountPremium = null;
+}
+
 interface UploadProgressCallback {
   (uploadedBytes: number, totalBytes: number): void;
 }
@@ -79,6 +139,25 @@ export async function uploadFileToTelegram(
     throw new Error(
       `KumaDrive não pode enviar "${fileName}": o arquivo está vazio (0 bytes) e ` +
         `a API do Telegram não armazena arquivos de 0 byte.`,
+    );
+  }
+
+  // Guarda de tamanho: recusa ANTES de qualquer RPC. Arquivos acima do
+  // limite do Telegram nunca sobem — tentar só queima ~90s de timeouts
+  // por arquivo em CADA backup e martela a sessão de escrita. Isto é uma
+  // melhoria sobre o Teledrive original, que tenta e falha do jeito lento.
+  if (fileSize > TELEGRAM_PREMIUM_FILE_LIMIT) {
+    throw new Error(
+      `KumaDrive não vai enviar "${fileName}" (${gb(fileSize)}): excede o limite ` +
+        `máximo do Telegram (4 GB por arquivo, inclusive contas Premium). ` +
+        `Divida o arquivo em partes menores ou compacte-o antes de tentar de novo.`,
+    );
+  }
+  if (fileSize > TELEGRAM_FREE_FILE_LIMIT && !(await accountHasPremium(client))) {
+    throw new Error(
+      `KumaDrive não vai enviar "${fileName}" (${gb(fileSize)}): o Telegram limita ` +
+        `arquivos a 2 GB em contas gratuitas (contas Premium chegam a 4 GB). ` +
+        `Divida o arquivo em partes menores e tente de novo.`,
     );
   }
 

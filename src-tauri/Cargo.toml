@@ -1,6 +1,6 @@
 [package]
 name = "kumadrive"
-version = "0.2.8"
+version = "0.2.9"
 description = "Armazenamento em nuvem ilimitado, gratuito e privado usando o Telegram"
 authors = ["KumaDrive Team <team@kumadrive.app>"]
 license = "GPL-3.0"

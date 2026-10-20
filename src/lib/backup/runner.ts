@@ -96,6 +96,15 @@ const BACKUP_BREATHER_MAX_MS = 2_000;
 const BACKUP_UPLOAD_CONCURRENCY = 2;
 
 /**
+ * Quantas falhas de upload consecutivas por timeout puro (sem NENHUM
+ * sucesso entre elas) antes de concluir que a sessão está penalizada e
+ * abortar o run com a instrução de re-login. 4 cobre os 2 workers com
+ * folga (um blip de rede isolado reseta no sucesso seguinte) sem deixar
+ * o usuário esperar os ~95s de timeout por arquivo mais de ~6 minutos.
+ */
+const BACKUP_STALL_ABORT_THRESHOLD = 4;
+
+/**
  * Janela em que, após um FLOOD_WAIT, os workers NÃO iniciam novos arquivos.
  *
  * Limita a AMPLIFICAÇÃO do flood: sem este gate, os workers paralelos
@@ -556,6 +565,15 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   // breather. Um booleano global era resetado por qualquer worker, podendo
   // descartar o sinal de retry de outro worker concorrente.
   let retriesSinceBreather = 0;
+  // Falhas de upload consecutivas por TIMEOUT puro (sem FLOOD_WAIT, sem
+  // erro de servidor respondido). Usado para detectar a sessão penalizada:
+  // o Telegram passa a IGNORAR as escritas de uma sessão que abusou de
+  // rate-limits (as leituras continuam funcionando) — o sintoma é exatamente
+  // "todo upload dá timeout de 30s, até arquivos minúsculos". Sem isto, o
+  // backup inteiro (centenas de arquivos) moeria em timeouts de ~95s cada
+  // com a cara de "lento". Com isto, o run aborta cedo com a instrução
+  // que resolve: sair e entrar novamente (nova auth key = sessão limpa).
+  let consecutiveUploadTimeouts = 0;
   // Gate de FLOOD_WAIT compartilhado entre os workers. Quando um worker vê
   // um FLOOD_WAIT, grava aqui o instante até o qual NENHUM worker deve
   // iniciar um novo arquivo. Sem isto, os uploads paralelos continuavam
@@ -892,6 +910,9 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       }); // fim do enqueueCommit
 
       uploadedCount++;
+      // Qualquer sucesso de upload zera a contagem de timeouts consecutivos
+      // (a detecção de sessão penalizada só dispara quando NADA sobe).
+      consecutiveUploadTimeouts = 0;
       opts.onProgress?.({
         uploaded: uploadedCount + failedCount,
         total: totalToProcess,
@@ -932,6 +953,46 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       void invoke("log_vault_state", {
         state: `BACKUP_UPLOAD_FAIL file=${logPathLabel(file.absPath)} size=${file.size} err=${sanitizeLogMessage(msg)}`,
       }).catch(() => {});
+      // Detecção de sessão penalizada (escritas ignoradas pelo Telegram).
+      //
+      // Timeout puro de CHUNK DE ESCRITA = o servidor NEM RESPONDEU o
+      // `SaveFilePart`/`SaveBigFilePart` dentro do teto (`Timeout of
+      // 30000ms exceeded for SaveFilePart`). Não é FLOOD_WAIT (o servidor
+      // responde pedindo espera), nem erro de autenticação (responde 401),
+      // nem o finalize `client.sendFile` — este último é um blip de rede
+      // comum com os chunks já salvos, e abortar um run saudável por ele
+      // seria pior do que continuar. Quando o timeout de chunk acontece em
+      // sequência, sem nenhum sucesso no meio, a leitura segue funcionando
+      // (bootstrap/orphan-scan) — o padrão é a penalidade de escrita
+      // aplicada à auth key desta sessão. Nada de moer a lista inteira de
+      // arquivos em timeouts: aborta com a instrução que de fato resolve.
+      const isChunkWriteTimeout =
+        /Timeout of \d+ms exceeded for (SaveFilePart|SaveBigFilePart)/.test(msg);
+      if (isChunkWriteTimeout) {
+        consecutiveUploadTimeouts++;
+        if (
+          consecutiveUploadTimeouts >= BACKUP_STALL_ABORT_THRESHOLD &&
+          !abortRun
+        ) {
+          abortRun = true;
+          firstError =
+            `O Telegram está ignorando os envios desta sessão: ` +
+            `${consecutiveUploadTimeouts} arquivos pararam em timeout, ` +
+            `enquanto a leitura do canal funciona normalmente. É um bloqueio ` +
+            `temporário de escrita aplicado a ESTA sessão (as versões antigas ` +
+            `do app dispararam tempestades de mensagens e pagaram o preço). ` +
+            `Saia da sua conta e entre novamente no KumaDrive — a nova sessão ` +
+            `desbloqueia os envios — e execute o backup outra vez.`;
+          console.warn(
+            `[backup.runner] session write stall: ${consecutiveUploadTimeouts} consecutive upload timeouts; aborting run.`,
+          );
+          void invoke("log_vault_state", {
+            state: `SESSION_WRITE_STALL consecutive_timeouts=${consecutiveUploadTimeouts} action=abort_run`,
+          }).catch(() => {});
+        }
+      } else {
+        consecutiveUploadTimeouts = 0;
+      }
       // Persist progress before bailing on a hard error. Não pode
       // propagar: o `catch` acima já contabilizou a falha do arquivo e
       // o loop precisa seguir para os demais. Uma falha ao gravar o

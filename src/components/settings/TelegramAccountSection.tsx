@@ -91,6 +91,11 @@ export default function TelegramAccountSection() {
       const { disconnectClient } = await import("@/lib/telegram/client");
       await disconnectClient();
 
+      // O memo de Premium é da CONTA que acabou de sair — zera para a
+      // próxima não herdar o valor.
+      const { resetAccountPremiumCache } = await import("@/lib/telegram/uploader");
+      resetAccountPremiumCache();
+
       await invoke("clear_session_only").catch((e: any) =>
         console.warn("clear_session_only failed:", e)
       );

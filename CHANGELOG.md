@@ -5,6 +5,15 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.9] — 2026-10-20
+
+### Corrigido
+- **src/lib/telegram/uploader.ts** — arquivos maiores que o limite do Telegram eram tentados em todos os backups e falhavam do jeito mais caro: ~90 s de timeouts por tentativa martelando a sessão de escrita, a cada execução. O Telegram limita arquivos a 2 GB (contas gratuitas) ou 4 GB (Premium) e **nenhum app pode contornar** — agora o KumaDrive recusa na hora, antes de qualquer envio, com uma mensagem clara dizendo o limite e sugerindo dividir o arquivo. Um arquivo de 9,4 GB, por exemplo, era tentado todo backup para nunca conseguir subir.
+- **src/lib/backup/runner.ts** — quando o Telegram decide ignorar as escritas de uma sessão (penalidade aplicada à sessão após abuso de limites), o sintoma era o backup inteiro moendo em timeouts de 30 s por arquivo com a cara de "lento", sem explicação — as leituras continuavam funcionando normalmente, o que tornava o problema invisível. Agora o app reconhece o padrão (vários envios parados em timeout de bloco, sem nenhum sucesso) e **interrompe o backup avisando o que fazer: sair e entrar novamente na conta**, o que gera uma sessão nova e desbloqueia os envios. Esta é uma melhoria sobre o Teledrive original, que continuaria tentando arquivo por arquivo.
+
+### Observação de diagnóstico
+Durante a análise em campo desta versão, o log mostrou leituras rápidas e uploads travados em timeout na mesma sessão, enquanto o Teledrive original — mesma máquina, mesma rede, mesma conta, outra sessão — subia tudo sem problema: a penalidade é da *sessão*, herdada das tempestades de mensagens das versões antigas do KumaDrive. Sair e entrar novamente resolve; e as versões 0.2.7–0.2.9 não geram mais as tempestades que causaram a penalidade.
+
 ## [0.2.8] — 2026-10-20
 
 ### Corrigido
