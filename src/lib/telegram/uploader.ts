@@ -10,7 +10,10 @@ import bigInt from "big-integer";
 import { Buffer } from "buffer";
 import { invoke } from "@tauri-apps/api/core";
 import { withTimeout } from "../storage/metadataStore";
-import { withTelegramRetry } from "./rateLimit";
+import {
+  withTelegramRetry,
+  FLOOD_WAIT_MAX_CAP_SECONDS,
+} from "./rateLimit";
 
 /**
  * Tamanho do chunk enviado por `SaveFilePart`/`SaveBigFilePart`.
@@ -127,6 +130,14 @@ export async function uploadFileToTelegram(
       // Upload part through the shared retry helper. The chunk is re-read
       // from disk on each attempt via the closure — important because the
       // seek/read may have advanced the handle position mid-failure.
+      //
+      // FLOOD_WAIT aqui usa o TETO LONGO (900s), não o curto de 30s. Motivo
+      // (evidência de campo): o Telegram pediu esperas de 125s→600s→884s e
+      // o app, com teto de 30s, esperava 30s e reenviava o chunk — o que
+      // RENOVA e AGRAVA o flood em vez de resolvê-lo. O resultado era o
+      // backup falhar com "falha na conexão" após subir 2 arquivos. Com o
+      // teto longo esperamos o prazo que o Telegram exigiu e o upload
+      // converge em vez de escalar.
       const chunkLabel = `${isBig ? "SaveBigFilePart" : "SaveFilePart"}(${partIndex}/${totalParts})`;
       await withTelegramRetry(
         () =>
@@ -151,12 +162,12 @@ export async function uploadFileToTelegram(
             chunkLabel
           ),
         chunkLabel,
-        // Cap at 5 attempts per chunk — 5 Ã— 30s (FLOOD_WAIT_CAP) = 150s
-        // worst case before failing. Combined with the per-batch
-        // breather in the runner, persistent rate limits surface as
-        // file failures (visible in the overlay) rather than 8-minute
-        // stalls.
-        5,
+        // Menos tentativas que antes (5) de propósito: como cada espera de
+        // FLOOD_WAIT agora respeita o prazo real, uma tentativa longa já
+        // resolve; insistir 5× só multiplicaria a espera total. 3 tentativas
+        // cobrem blips de rede sem transformar um rate-limit persistente
+        // numa espera de horas.
+        3,
         onRetry
           ? (e) =>
               onRetry({
@@ -164,6 +175,9 @@ export async function uploadFileToTelegram(
                 label: chunkLabel,
               })
           : undefined,
+        // Teto de FLOOD_WAIT longo: esperar o prazo pedido, não retentar a
+        // cada 30s (que agrava o flood).
+        FLOOD_WAIT_MAX_CAP_SECONDS,
       );
       
       // Update progress
@@ -205,8 +219,9 @@ export async function uploadFileToTelegram(
           finalizeLabel
         ),
       finalizeLabel,
-      // Finalize cap: 3 attempts Ã— 30s = 90s worst case. The chunks
-      // are already on Telegram, so a 90s wait is plenty.
+      // Finalize cap: 3 attempts. Se um FLOOD_WAIT vier aqui, esperamos o
+      // prazo real (teto longo) — os chunks já estão no Telegram, então
+      // convergir vale mais que desistir rápido e reenviar tudo depois.
       3,
       onRetry
         ? (e) =>
@@ -215,6 +230,7 @@ export async function uploadFileToTelegram(
               label: finalizeLabel,
             })
         : undefined,
+      FLOOD_WAIT_MAX_CAP_SECONDS,
     );
     
     return result;

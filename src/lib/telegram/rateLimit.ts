@@ -251,12 +251,21 @@ export type TelegramRetryEvent = {
  *                     that will be retried. The BackupProgressOverlay
  *                     uses this to show "Retrying 3/5 (FLOOD_WAIT 30s)"
  *                     instead of a frozen progress bar.
+ * @param floodCapSeconds Teto do FLOOD_WAIT para ESTA chamada.
+ *
+ *   O padrão (`FLOOD_WAIT_CAP_SECONDS` = 30s) é o teto CURTO. Ele só é
+ *   seguro quando retentar cedo não piora o bloqueio — o que NÃO é o caso
+ *   de upload de arquivo: cada retry prematuro reenvia o chunk e ESCALA o
+ *   flood (o log de campo mostrou 125s → 600s → 884s). Por isso o uploader
+ *   passa `FLOOD_WAIT_MAX_CAP_SECONDS` (900s) para esperar o prazo que o
+ *   Telegram pediu de verdade, em vez de insistir de 30 em 30s.
  */
 export async function withTelegramRetry<T>(
   fn: () => Promise<T>,
   label: string,
   maxAttempts: number = 5,
-  onRetry?: (event: TelegramRetryEvent) => void
+  onRetry?: (event: TelegramRetryEvent) => void,
+  floodCapSeconds: number = FLOOD_WAIT_CAP_SECONDS,
 ): Promise<T> {
   let lastErr: any = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -273,7 +282,7 @@ export async function withTelegramRetry<T>(
           `[${label}] Failed after ${maxAttempts} attempts: ${err?.message ?? err}`
         );
       }
-      const delay = computeRetryDelay(attempt, err);
+      const delay = computeRetryDelay(attempt, err, floodCapSeconds);
       // eslint-disable-next-line no-console
       console.warn(
         `[${label}] transient error (attempt ${attempt}/${maxAttempts}); waiting ${Math.round(delay / 100) / 10}s →`,

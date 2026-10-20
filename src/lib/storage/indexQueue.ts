@@ -218,10 +218,76 @@ class ChannelQueue {
   /** Timestamp do último FLOOD_WAIT visto (para renovar a janela). */
   private lastFloodAt = 0;
   private lastError: any = null;
+  /**
+   * Último erro de commit observado no drain desta rodada de resume. Usado
+   * pelo `resume()` para reportar honestamente ao backup se o índice
+   * consolidado foi gravado. Zerado no início de cada `drain()`.
+   */
+  private resumeCommitError: any = null;
+  /**
+   * Contador de suspensões de commit. Enquanto > 0, `enqueue` guarda o
+   * estado pendente mas NÃO drena — o índice só é gravado quando o
+   * contador volta a 0 (ver `resume()`).
+   *
+   * Por que existe: durante um backup, o runner chama `enqueueSave` a cada
+   * arquivo. Cada commit reescreve o índice INTEIRO (N mensagens + delete
+   * das antigas). Num backup de centenas de arquivos isso são milhares de
+   * mensagens — a origem dominante do FLOOD_WAIT que derrubava o backup.
+   * Com o backup suspenso, todas essas chamadas coalescem num único commit
+   * ao final. O manifesto continua sendo gravado por arquivo (é ele quem
+   * garante a recuperação), então nada se perde se o app morrer no meio.
+   */
+  private suspendCount = 0;
   private readonly channelId: string;
 
   constructor(channelId: string) {
     this.channelId = channelId;
+  }
+
+  /**
+   * Suspende os commits do índice. Chamadas pareadas com `resume()`.
+   * Seguro para uso aninhado (contador).
+   */
+  suspend(): void {
+    this.suspendCount++;
+  }
+
+  /**
+   * Retoma os commits. Quando o contador chega a 0, drena o pendente UMA
+   * vez e AGUARDA o commit — gravando o índice consolidado de todas as
+   * chamadas que aconteceram durante a suspensão.
+   *
+   * É `async` de propósito: o chamador (o final do backup) precisa saber se
+   * o índice foi de fato gravado para reportar honestamente. Antes era
+   * `void this.drain()` — fire-and-forget — e o `await resumeIndexCommits`
+   * do runner não aguardava nada, o que tornava o relatório enganoso (dizia
+   * "gravado" enquanto o commit ainda corria em background).
+   */
+  async resume(): Promise<void> {
+    if (this.suspendCount > 0) this.suspendCount--;
+    if (this.suspendCount === 0) {
+      await this.drain();
+      // Relatório HONESTO do commit consolidado.
+      //
+      // `drain()` engole a falha por design (a fila retenta sozinha em
+      // background). Mas quem chamou o `resume` é o fim de um backup e
+      // PRECISA saber se o índice consolidado foi de fato gravado — antes o
+      // `enqueue` por arquivo resolvia na hora (deadlock) e o erro do
+      // commit real ficava invisível, então o run reportava sucesso mesmo
+      // com o índice falhando. Aqui convertemos "sobrou pendência ou houve
+      // erro" em rejeição, para o runner degradar o status.
+      if (this.retryingEntry || this.pending) {
+        throw (
+          this.resumeCommitError ??
+          this.lastError ??
+          new Error("index commit did not complete (retry pending)")
+        );
+      }
+      if (this.resumeCommitError) {
+        // Hard error: o drain não deixou pendência, mas o commit falhou.
+        throw this.resumeCommitError;
+      }
+    }
   }
 
   enqueue(state: TeleFile[]): Promise<void> {
@@ -234,15 +300,28 @@ class ChannelQueue {
       if (this.pending) {
         this.pending.resolve();
       }
+      // SUSPENSÃO (backup em andamento): o estado vai para o `pending` (para
+      // ser gravado UMA vez no commit consolidado do `resume`), mas a
+      // promessa resolve IMEDIATAMENTE.
+      //
+      // Por que resolver na hora, e não deixar pendente: durante o backup o
+      // runner chama `enqueueSave` por arquivo e AGUARDA cada um (é o
+      // rollback de hard-error). Sob suspensão, `drain()` faz early-return,
+      // então uma promessa que só resolvesse no commit ficaria pendente até
+      // o `resume` — que só roda DEPOIS de o pool terminar, que por sua vez
+      // está aguardando essa promessa. Deadlock determinístico: o backup
+      // travava no primeiro arquivo. Resolver na hora quebra o ciclo; o
+      // estado real é gravado no commit consolidado do `resume`.
       this.pending = {
         state,
-        resolve,
+        resolve: this.suspendCount > 0 ? () => {} : resolve,
         reject,
       };
       // Mirror the latest pending state to the store snapshot too — this is
       // what surfaces in the topbar's "Retrying" pill.
       this.updateStoreState();
       void this.drain();
+      if (this.suspendCount > 0) resolve();
     });
   }
 
@@ -274,6 +353,13 @@ class ChannelQueue {
     this.floodWaitSpentMs = 0;
     this.lastFloodAt = 0;
     this.lastError = null;
+    // Zera a suspensão. O flush é chamado no logout/shutdown e representa o
+    // fim do ciclo: se um backup estava suspenso e por qualquer motivo não
+    // chegou a chamar `resume` (cancel, throw, encerramento abrupto), um
+    // `suspendCount` órfão deixaria `drain()` em early-return para SEMPRE e
+    // o índice nunca mais gravaria neste canal até reiniciar o app. O flush
+    // é exatamente onde esse estado acumulado deve ser descartado.
+    this.suspendCount = 0;
     this.updateStoreState();
   }
 
@@ -309,6 +395,12 @@ class ChannelQueue {
   }
 
   private async drain(): Promise<void> {
+    // Zera o erro de commit ANTES de qualquer early-return: a intenção é
+    // "por rodada de drain". Se ficasse depois do `if (this.inflight)`, uma
+    // chamada que retornasse cedo preservaria o erro de OUTRA rodada e o
+    // `resume()` poderia reportar uma falha já resolvida.
+    this.resumeCommitError = null;
+
     // If already draining, just return — the next entry has already replaced
     // the pending slot and will be picked up when the current pass finishes.
     if (this.inflight) return;
@@ -322,6 +414,11 @@ class ChannelQueue {
     // toda esta correção. Um `enqueue` durante a espera apenas substitui
     // `pending` (coalesce); o timer armado drena quando o prazo vencer.
     if (this.retryTimer) return;
+
+    // Suspensão (backup em andamento): não drena até `resume()`. As
+    // chamadas de `enqueueSave` do backup coalescem no `pending` e viram um
+    // único commit ao final, em vez de reescrever o índice por arquivo.
+    if (this.suspendCount > 0) return;
 
     this.inflight = (async () => {
       try {
@@ -355,6 +452,7 @@ class ChannelQueue {
             this.retryAttempt = 0;
           } catch (err: any) {
             this.lastError = err;
+            this.resumeCommitError = err;
             if (isHardError(err)) {
               this.retryingEntry = null;
               this.retryAttempt = 0;
@@ -701,27 +799,44 @@ class ChannelQueue {
         throw err;
       }
 
-      // Pin is truly best-effort now. Pin failures NEVER cause a retry
-      // because loadIndex picks by message id, not pin status. The pin
-      // is only a fast-path hint to find the index quickly; if it's
-      // missing, the scan-on-load path still finds the right messages.
-      try {
-        await withTimeout(
-          client.invoke(
-            new Api.messages.UpdatePinnedMessage({
-              peer,
-              id: msgId,
-              unpin: false,
-              silent: true,
-            })
-          ),
-          PIN_TIMEOUT_MS,
-          `UpdatePinnedMessage(chunk ${i})`
-        );
-      } catch (err: any) {
-        await invoke("log_vault_state", {
-          state: `INDEX_PIN_FAIL chunk=${i} reason=${err?.message ?? err}`,
-        }).catch(() => {});
+      // Pin é BEST-EFFORT e fixamos apenas as PONTAS da epoch (chunk 0 e o
+      // último) — não os N chunks.
+      //
+      // Por que as pontas: o pin serve apenas como dica de fast-path
+      // (`InputMessagesFilterPinned` acha as mensagens de índice sem varrer
+      // o canal). O reader depois completa com `getMessages(recent, limit=200)`
+      // e `pickCoherentIndexSet` reconstrói a epoch. Fixar só o chunk 0
+      // bastava ENQUANTO todos os chunks coubessem nessa janela de 200 — se a
+      // epoch crescer além dela, o chunk 0 sozinho não permite reconstruir o
+      // conjunto coerente e o load cai no merge best-effort (sem persist).
+      // Ancorar também o ÚLTIMO chunk mantém o fast-path válido mesmo quando
+      // a epoch ultrapassa a janela, a ~89% menos pins que os N de antes.
+      //
+      // Por que isto importa (evidência de campo): `UpdatePinnedMessage` é
+      // a chamada que o Telegram bloqueia com mais força — o log mostrou
+      // FLOOD_WAIT subindo até 884s SÓ nos pins (`INDEX_PIN_FAIL`), e cada
+      // commit fixava os N chunks. Com um commit por arquivo num backup de
+      // centenas de arquivos, isso eram milhares de pins, a origem
+      // dominante do flood que derrubava o backup.
+      if (i === 0 || i === chunks.length - 1) {
+        try {
+          await withTimeout(
+            client.invoke(
+              new Api.messages.UpdatePinnedMessage({
+                peer,
+                id: msgId,
+                unpin: false,
+                silent: true,
+              })
+            ),
+            PIN_TIMEOUT_MS,
+            `UpdatePinnedMessage(chunk ${i})`
+          );
+        } catch (err: any) {
+          await invoke("log_vault_state", {
+            state: `INDEX_PIN_FAIL chunk=${i} reason=${err?.message ?? err}`,
+          }).catch(() => {});
+        }
       }
     }
 
@@ -885,4 +1000,25 @@ export function retryQueue(channelId: string): void {
   // enqueue with the current store state to force a retry attempt.
   const cur = useFileStore.getState().files;
   void q.enqueue(cur);
+}
+
+/**
+ * Suspende os commits do índice para um canal. Usado durante o backup para
+ * não reescrever o índice inteiro a cada arquivo (a origem dominante do
+ * FLOOD_WAIT). As chamadas de `enqueueSave` feitas enquanto suspenso
+ * coalescem e viram UM único commit no `resumeIndexCommits`.
+ *
+ * Seguro para uso aninhado — o contador é pareado com o resume.
+ */
+export function suspendIndexCommits(channelId: string): void {
+  getIndexQueue(channelId).suspend();
+}
+
+/**
+ * Retoma os commits do índice. Quando o último `suspend` pareado é
+ * liberado, drena o estado consolidado e AGUARDA o commit — para que o
+ * chamador saiba se o índice foi de fato gravado.
+ */
+export async function resumeIndexCommits(channelId: string): Promise<void> {
+  await getIndexQueue(channelId).resume();
 }

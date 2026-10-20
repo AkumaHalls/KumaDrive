@@ -5,6 +5,17 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.7] — 2026-10-20
+
+### Corrigido
+- **src/lib/telegram/uploader.ts** — o envio de cada bloco de arquivo usava o mesmo limite curto de espera (30 s) que o índice, então quando o Telegram pedia "espere 200 s" o app esperava 30 s e reenviava o bloco — o que renova e AGRAVA o bloqueio. Era exatamente o sintoma relatado: o backup demorava ~2 min, subia 2 arquivos e voltava a falhar com "falha na conexão". Agora o upload respeita o prazo real pedido pelo Telegram (até 15 min) e usa menos tentativas por bloco, porque uma espera longa já resolve o que antes exigia 5 tentativas curtas que só pioravam a situação.
+- **src/lib/backup/runner.ts** — o backup reescrevia o índice inteiro (dezenas de mensagens e fixações) a cada arquivo enviado, e a fixação de cada bloco do índice é justamente a chamada que o Telegram bloqueia com mais força. Num backup de centenas de arquivos isso somava milhares de mensagens e era a principal causa do bloqueio. Agora o índice é suspenso durante todo o backup e gravado uma única vez ao final, e cada gravação fixa apenas as pontas do índice em vez de todos os blocos. O manifesto continua sendo gravado por arquivo, então nada se perde se o app fechar no meio.
+- **src/lib/backup/runner.ts** — quando um envio batia no limite de taxa do Telegram, os workers paralelos seguiam pegando arquivos novos e enviando, somando pressão durante o bloqueio (parte do "sobe 2 e falha"). Agora, ao primeiro bloqueio, os workers param de captar novos arquivos até o prazo passar; o paralelismo também caiu de 3 para 2.
+- **src/lib/backup/runner.ts** — o resultado do backup podia reportar sucesso mesmo quando o índice na nuvem não era atualizado, e um erro de espera num bloco podia travar a fila de gravação do índice para sempre. Agora o commit consolidado do índice é aguardado e sua falha degrada o resultado para "parcial" com aviso visível, e a suspensão do índice é sempre liberada (inclusive em cancelamento e no logout).
+
+### Adicionado
+- **src/lib/backup/runner.ts** — o envio de arquivos do backup agora registra no log de diagnóstico o sucesso, a falha e cada espera por limite de taxa (com o tempo pedido pelo Telegram). Antes uma falha de backup não deixava rastro nenhum, e diagnosticar "subiu 2 e falhou" era adivinhação. O caminho dos arquivos no log é reduzido a nome + hash para não expor a estrutura de pastas do usuário.
+
 ## [0.2.6] — 2026-10-20
 
 ### Corrigido

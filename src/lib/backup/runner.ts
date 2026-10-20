@@ -36,6 +36,8 @@
  */
 
 import { uploadFileToTelegram } from "../telegram/uploader";
+import { invoke } from "@tauri-apps/api/core";
+import { createHash } from "crypto";
 import { useFileStore } from "@/stores/fileStore";
 import { useLicenseStore } from "@/stores/licenseStore";
 import { useAuthStore } from "@/stores/authStore";
@@ -55,7 +57,11 @@ import {
 } from "./manifest";
 import { sanitizeFolderSegment, walkSourceFolders } from "./walker";
 import { detectOS, getDeviceName } from "../secure/deviceInfo";
-import { enqueueSave } from "../storage/indexQueue";
+import {
+  enqueueSave,
+  suspendIndexCommits,
+  resumeIndexCommits,
+} from "../storage/indexQueue";
 import {
   describeTelegramError,
   isAuthError,
@@ -80,14 +86,71 @@ const BACKUP_BREATHER_MAX_MS = 2_000;
 /**
  * Quantos uploads de arquivos rodam em paralelo no backup.
  *
- * O `uploadFileToTelegram` já faz o backoff de FLOOD_WAIT por chunk; o
- * limite aqui é o mesmo pool de ~3 que o envio normal (uploadManager)
- * usa, para não saturar a conexão MTProto nem o rate-limit por segundo do
- * Telegram. As escritas (manifesto / índice) continuam SERIALIZADAS no
- * passo de commit de cada arquivo, então o paralelismo é só de rede+disco
- * de leitura.
+ * Reduzido de 3 para 2. Motivo (evidência de campo): com 3 uploads em
+ * paralelo, quando o Telegram entra em FLOOD_WAIT os três arquivos ficam
+ * esperando/retentando ao mesmo tempo, competindo pela mesma cota e
+ * AGRAVANDO o flood em vez de esperar por ele. Dois ainda aproveita a
+ * banda em rede boa, mas o gate de flood abaixo serializa de fato quando o
+ * Telegram sinaliza rate-limit.
  */
-const BACKUP_UPLOAD_CONCURRENCY = 3;
+const BACKUP_UPLOAD_CONCURRENCY = 2;
+
+/**
+ * Janela em que, após um FLOOD_WAIT, os workers NÃO iniciam novos arquivos.
+ *
+ * Limita a AMPLIFICAÇÃO do flood: sem este gate, os workers paralelos
+ * seguiam pegando arquivos novos e enviando chunks enquanto o Telegram
+ * ainda bloqueava, somando pressão. Com o gate, o primeiro FLOOD_WAIT faz
+ * os demais workers pararem de CAPTAR novos arquivos até o prazo passar.
+ *
+ * Limitação conhecida e aceita: o gate é checado no topo do loop do
+ * `worker()`, então NÃO interrompe um arquivo que já esteja em voo (chunks
+ * em andamento). A concorrência é 2, então no pior caso há um arquivo
+ * adicional drenando; a garantia real é "não ACRESCENTA carga nova durante
+ * o bloqueio", não "carga zero".
+ *
+ * O valor é atualizado pelo callback `onRetry` (ver uploadOneFile) e
+ * clampado por BACKUP_FLOOD_GATE_MAX_MS; este é apenas o piso defensivo.
+ */
+const BACKUP_FLOOD_GATE_DEFAULT_MS = 30_000;
+
+/**
+ * Teto do gate de FLOOD_WAIT. Mesmo o teto longo (900s) é um limite
+ * defensivo: se o Telegram pedir mais do que isso, esperar além não ajuda
+ * (o retry do chunk já desiste antes), e um gate sem teto deixaria todos os
+ * workers parados por tempo arbitrário. Igual a
+ * `FLOOD_WAIT_MAX_CAP_SECONDS` do rateLimit.
+ */
+const BACKUP_FLOOD_GATE_MAX_MS = 900_000;
+
+/**
+ * Reduz um caminho absoluto a `basename#hash8` para o log de diagnóstico.
+ *
+ * Por que não logar o caminho cru: o `vault_state.log` é persistente em
+ * disco e o CONTRIBUTING orienta colar esse log em bug reports. O caminho
+ * absoluto revela a estrutura de arquivos (e nomes sensíveis) do usuário —
+ * `C:\Users\x\Documentos\senhas.txt` é PII. O basename preserva a
+ * utilidade diagnóstica (dá para correlacionar OK/FAIL/RETRY do MESMO
+ * arquivo pelo sufixo `#hash`) sem expor o resto da árvore.
+ */
+function logPathLabel(absPath: string): string {
+  const base = absPath.split(/[\\/]/).pop() ?? absPath;
+  const hash = createHash("sha256").update(absPath).digest("hex").slice(0, 8);
+  return `${base}#${hash}`;
+}
+
+/**
+ * Sanitiza uma mensagem de erro antes de gravar no log: remove caminhos
+ * absolutos (Windows e POSIX) e trunca. Erros do Telegram/GramJS podem
+ * embutir JSON com nomes de pasta enviados pelo usuário (ex.: o path dentro
+ * do caption), e erros de Rust podem trazer `path.display()`.
+ */
+function sanitizeLogMessage(msg: string): string {
+  return msg
+    .replace(/[A-Za-z]:\\[^\s"']*/g, "<path>")
+    .replace(/(?:~\/|\/)[^\s"':]*/g, "<path>")
+    .slice(0, 300);
+}
 
 /**
  * A cada quantos arquivos reavaliamos o gate de bootstrap.
@@ -459,6 +522,14 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   // saber disso em vez de ver "sucesso" toda noite.
   let manifestSaveFailures = 0;
 
+  // Quantas vezes o commit CONSOLIDADO do índice falhou no fim do backup.
+  // É um contador separado de `manifestSaveFailures` porque a mensagem de
+  // status é diferente: o manifesto (gravado por arquivo) pode ter
+  // persistido com sucesso e mesmo assim o índice falhar. Somar os dois
+  // fazia a mensagem "não conseguiu gravar o registro… reenvio" aparecer
+  // mesmo quando não haveria reenvio — diagnóstico enganoso.
+  let indexCommitFailures = 0;
+
   // Gate de bootstrap. Reavaliado no primeiro arquivo e a cada
   // `BOOTSTRAP_GATE_RETRIES` arquivos, e NÃO dentro do `for` original.
   //
@@ -485,6 +556,11 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   // breather. Um booleano global era resetado por qualquer worker, podendo
   // descartar o sinal de retry de outro worker concorrente.
   let retriesSinceBreather = 0;
+  // Gate de FLOOD_WAIT compartilhado entre os workers. Quando um worker vê
+  // um FLOOD_WAIT, grava aqui o instante até o qual NENHUM worker deve
+  // iniciar um novo arquivo. Sem isto, os uploads paralelos continuavam
+  // enviando durante o bloqueio e o escalavam (era o "sobe 2 e falha").
+  let floodGateUntil = 0;
   // Abort cooperativo: um worker que encontra erro fatal de sessão marca
   // isto; os demais param de pegar novos arquivos.
   let abortRun = false;
@@ -639,6 +715,39 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
           // Sinaliza ao breather adaptativo que este lote precisou de
           // retry → a pausa de lote escala para o valor longo.
           retriesSinceBreather++;
+          // Gate de flood: SÓ quando o erro foi realmente um FLOOD_WAIT.
+          //
+          // Antes o gate armava `max(waitMs, 30s)` para QUALQUER retry — um
+          // blip de rede com backoff de 1s travava TODOS os workers por 30s.
+          // O gate existe para impedir que os workers paralelos enviem
+          // durante o bloqueio do Telegram, e para isso só o FLOOD_WAIT conta.
+          // `e.floodSeconds` só é preenchido quando o Telegram de fato exigiu
+          // espera (ver scheduleRetry/parseFloodWaitSeconds no rateLimit).
+          if (e.floodSeconds != null) {
+            const wait = Math.min(
+              Math.max(e.waitMs, BACKUP_FLOOD_GATE_DEFAULT_MS),
+              BACKUP_FLOOD_GATE_MAX_MS
+            );
+            const until = Date.now() + wait;
+            if (until > floodGateUntil) floodGateUntil = until;
+            // Loga a ENTRADA no gate: sem isto o overlay parece congelado
+            // durante a espera longa e não há como distinguir "esperando
+            // flood" de "travado".
+            void invoke("log_vault_state", {
+              state:
+                `BACKUP_FLOOD_GATE file=${logPathLabel(file.absPath)} ` +
+                `wait_ms=${wait} flood_s=${e.floodSeconds}`,
+            }).catch(() => {});
+          }
+          // Registra o retry no log de diagnóstico. Aqui aparece o
+          // FLOOD_WAIT real (segundos pedidos pelo Telegram) e o prazo que
+          // o app vai esperar — é a evidência que faltava para diagnosticar
+          // o backup sem adivinhar. Caminho reduzido a basename#hash (PII).
+          void invoke("log_vault_state", {
+            state:
+              `BACKUP_UPLOAD_RETRY file=${logPathLabel(file.absPath)} attempt=${e.attempt}/${e.maxAttempts} ` +
+              `wait_ms=${e.waitMs} flood_s=${e.floodSeconds ?? "-"}`,
+          }).catch(() => {});
           useBackupProgressStore.getState().setRetry({
             attempt: e.attempt,
             maxAttempts: e.maxAttempts,
@@ -653,6 +762,13 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
           `upload returned no usable message id: ${JSON.stringify(message).slice(0, 120)}`,
         );
       }
+      // Log de sucesso no diagnóstico: mostra tamanho e id da mensagem, o
+      // que permite conferir se "subiu 2 arquivos" bate com o Telegram e
+      // correlacionar com os retries registrados acima. Caminho reduzido a
+      // basename#hash para não gravar PII no log em disco.
+      void invoke("log_vault_state", {
+        state: `BACKUP_UPLOAD_OK file=${logPathLabel(file.absPath)} size=${file.size} msg_id=${messageId}`,
+      }).catch(() => {});
       // Commit serializado: manifesto + índice. Roda na fila `commitChain`
       // para que a reatribuição de `manifest` e a escrita do índice não
       // intercalem entre os 3 workers paralelos.
@@ -808,6 +924,14 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       const msg = err instanceof Error ? err.message : String(err);
       firstError ??= msg;
       console.warn(`[backup.runner] failed to upload ${file.absPath}:`, msg);
+      // Registra a falha no log de diagnóstico (mesmo arquivo do
+      // vault_state.log). Antes o upload NÃO escrevia nada lá, então uma
+      // falha de backup não deixava rastro e o diagnóstico virava
+      // adivinhação. Com isto, o próximo "subiu 2 e falhou" tem evidência.
+      // Caminho e mensagem sanitizados (sem PII / sem JSON cru de erro).
+      void invoke("log_vault_state", {
+        state: `BACKUP_UPLOAD_FAIL file=${logPathLabel(file.absPath)} size=${file.size} err=${sanitizeLogMessage(msg)}`,
+      }).catch(() => {});
       // Persist progress before bailing on a hard error. Não pode
       // propagar: o `catch` acima já contabilizou a falha do arquivo e
       // o loop precisa seguir para os demais. Uma falha ao gravar o
@@ -854,6 +978,18 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   async function worker(): Promise<void> {
     while (true) {
       if (abortRun || opts.signal?.aborted) return;
+      // Gate de FLOOD_WAIT: enquanto um rate-limit recente estiver ativo,
+      // NÃO CAPTA um novo arquivo — espera o prazo, checando o cancel a
+      // cada 250ms para continuar interrompível. Não interrompe um arquivo
+      // já em voo (ver a limitação documentada em BACKUP_FLOOD_GATE_DEFAULT_MS),
+      // mas impede que os workers paralelos ACRESCENTEM carga durante o
+      // bloqueio (parte da causa do "sobe 2 arquivos e falha").
+      while (floodGateUntil > Date.now()) {
+        if (abortRun || opts.signal?.aborted) return;
+        const remaining = floodGateUntil - Date.now();
+        await new Promise((r) => setTimeout(r, Math.min(250, remaining)));
+      }
+      if (abortRun || opts.signal?.aborted) return;
       const i = nextIndex++;
       if (i >= totalToProcess) return;
       await uploadOneFile(i);
@@ -863,8 +999,63 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   if (opts.signal?.aborted) {
     firstError ??= "Cancelled by user.";
   } else {
-    const workerCount = Math.min(BACKUP_UPLOAD_CONCURRENCY, totalToProcess);
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    // Suspende os commits do índice por todo o backup. Sem isto, cada
+    // arquivo disparava um `enqueueSave` que reescrevia o índice INTEIRO
+    // (N mensagens + deletes), e num backup de centenas de arquivos isso
+    // eram milhares de mensagens — a origem dominante do FLOOD_WAIT que
+    // derrubava o backup. Com a suspensão, tudo coalesce num único commit
+    // no final. O manifesto continua sendo gravado por arquivo, então a
+    // recuperação não depende do índice.
+    //
+    // `suspend` e `resume` ficam pareados no MESMO try/finally: assim,
+    // qualquer throw do pool (mesmo algo inesperado fora de uploadOneFile)
+    // ainda passa pelo resume e nunca deixa o contador de suspensão órfão —
+    // que travaria todo commit de índice deste canal indefinidamente.
+    suspendIndexCommits(channelId);
+    let indexCommitFailed = false;
+    try {
+      const workerCount = Math.min(BACKUP_UPLOAD_CONCURRENCY, totalToProcess);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    } finally {
+      // Grava o índice UMA vez com o estado CONSOLIDADO e retoma os commits.
+      //
+      // O estado é ESCOPADO por canal: `useFileStore.files` é um store
+      // global e, em multi-conta, pode conter os arquivos de OUTRO canal.
+      // Commitar o array global no `channelId` deste run gravava o índice
+      // errado no canal errado (corrupção cruzada de metadados) — o guard
+      // `length > 0` não cobre o caso "não-vazio, porém de outro canal".
+      //
+      // Aguardamos o commit (sem `Promise.race`): o `resume()` agora é async
+      // e drena de fato, então sabemos o resultado. Uma corrida com timeout
+      // abandonava a promise sem cancelá-la — o commit seguia em background
+      // DEPOIS de o overlay anunciar "concluído", tornando o relatório
+      // mentiroso.
+      // NOTA: `enqueueSave` aqui roda com o canal AINDA suspenso
+      // (`resume` só vem abaixo), então resolve imediatamente e NÃO lança —
+      // não há catch a fazer. A detecção real de falha do commit consolidado
+      // é o `catch (resumeErr)` logo abaixo, que é onde o `drain` roda de
+      // fato.
+      const scoped = useFileStore
+        .getState()
+        .files.filter((f) => f.channelId === channelId);
+      if (scoped.length > 0) {
+        await enqueueSave(channelId, scoped);
+      }
+      // resume é async e agora PROPAGA falha do commit consolidado (o
+      // enqueueSave acima resolveu na hora por estar suspenso, então o erro
+      // real só aparece aqui). Marcamos `indexCommitFailed` para o
+      // relatório final degradar o status — sem isto o índice podia falhar
+      // e o run reportar sucesso silenciosamente.
+      try {
+        await resumeIndexCommits(channelId);
+      } catch (resumeErr) {
+        indexCommitFailed = true;
+        console.warn("[backup.runner] resume index commits failed:", resumeErr);
+      }
+    }
+    if (indexCommitFailed) {
+      indexCommitFailures++;
+    }
   }
 
   // Normalização do relatório pós-dreno: conta os arquivos que NUNCA foram
@@ -899,10 +1090,17 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
   //      gravado, então o próximo run vai reenviá-los. Sem isso o
   //      usuário veria "sucesso" toda noite enquanto o canal enche de
   //      duplicatas.
+  //   5. `indexCommitFailures > 0` também degrada para "partial": o índice
+  //      em nuvem não reflete os arquivos até o próximo heal/orphan-scan.
+  //      Sem degradar, o `firstError` da falha de índice nunca apareceria —
+  //      o overlay só mostra `error` quando o status é "failed"/"partial"
+  //      (ver BackupProgressOverlay), então o aviso morreria na UI e o run
+  //      diria "concluído" com o índice desatualizado.
   let status: BackupRunResult["status"];
   if (filesFailed > 0 && filesUploaded > 0) status = "partial";
   else if (filesFailed > 0) status = "failed";
   else if (manifestSaveFailures > 0) status = "partial";
+  else if (indexCommitFailures > 0) status = "partial";
   else if (filesUploaded > 0) status = "success";
   else status = "success"; // no-op run: nothing to upload, nothing failed
 
@@ -913,6 +1111,27 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
       `ser enviados novamente.`;
     firstError ??= msg;
     console.warn(`[backup.runner] ${msg}`);
+  }
+
+  // Falha do commit consolidado do índice: os arquivos e o manifesto estão
+  // ok (logo NÃO haverá reenvio), mas o índice em nuvem pode estar
+  // desatualizado até o próximo heal/orphan-scan. Mensagem distinta para
+  // não sugerir reenvio que não vai acontecer.
+  //
+  // ANEXA ao `firstError`, não usa `??=`: se o run já teve falha de upload,
+  // o `??=` faria o aviso de índice sumir por completo — e a falha de índice
+  // é a informação NOVA (a de upload o usuário já vê no resumo). O log é
+  // sempre gravado, independentemente do overlay.
+  if (indexCommitFailures > 0) {
+    const msg =
+      `O backup concluiu e registrou os arquivos, mas o índice na nuvem não pôde ` +
+      `ser atualizado agora (${indexCommitFailures}x). Ele será reconstruído na ` +
+      `próxima abertura do app.`;
+    firstError = firstError ? `${firstError} · ${msg}` : msg;
+    console.warn(`[backup.runner] ${msg}`);
+    void invoke("log_vault_state", {
+      state: `BACKUP_INDEX_FINAL_FAIL count=${indexCommitFailures}`,
+    }).catch(() => {});
   }
 
   // Audit job id — backend removed, set null.
