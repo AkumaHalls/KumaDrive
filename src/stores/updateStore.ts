@@ -18,6 +18,48 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
 
+/**
+ * Limpa o corpo da release do GitHub antes de mostrá-lo como "Novidades
+ * desta versão".
+ *
+ * Duas razões:
+ *  1. O corpo pode ser só o boilerplate de instalação (releases antigas,
+ *     ou uma release criada à mão fora do workflow que extrai o
+ *     CHANGELOG). Mostrar "Instaladores para Windows" como "Novidades"
+ *     é pior que não mostrar nada — o usuário acha que o app atualizou
+ *     sem trazer mudança.
+ *  2. O Tauri preenche `body` com o texto cru do release; removemos o
+ *     rodapé de instaladores e o separador para a tela ficar limpa.
+ *
+ * Retorna `null` quando, depois da limpeza, não sobra conteúdo útil —
+ * a tela simplesmente omite o bloco de novidades.
+ */
+export function sanitizeReleaseNotes(raw: string | null): string | null {
+  if (!raw) return null;
+  let text = raw;
+
+  // Corta o bloco de instaladores. Casamos apenas as linhas de RODAPÉ —
+  // `**Instaladores para Windows**` (formato novo) ou uma linha isolada
+  // `Instalador para Windows.` (formato antigo) — sempre ancoradas na
+  // linha inteira (`^...$` com `m`). Assim não cortamos uma nota legítima
+  // que apenas MENCIONE o instalador no meio de uma frase.
+  const installIdx = text.search(
+    /^\s*(?:\*\*Instaladores para Windows\*\*|Instalador para Windows\.?)\s*$/im,
+  );
+  if (installIdx >= 0) text = text.slice(0, installIdx);
+
+  // Remove o cabeçalho "## KumaDrive vX" (redundante: a tela já mostra o par).
+  text = text.replace(/^##\s*KumaDrive\s*v?[\d.]+\s*$/im, "");
+
+  // Remove a sub-rubrica "### Novidades desta versão" (redundante com o título).
+  text = text.replace(/^#+\s*Novidades desta versão\s*$/im, "");
+
+  // Remove separadores soltos e linhas vazias nas pontas.
+  text = text.replace(/^\s*-{3,}\s*$/gm, "").trim();
+
+  return text.length > 0 ? text : null;
+}
+
 export interface UpdateState {
   /** Versão em execução (vem do manifesto do Tauri, não do frontend). */
   currentVersion: string;
@@ -124,7 +166,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       set({
         currentVersion: current,
         availableVersion: update.version,
-        notes: update.body ?? null,
+        notes: sanitizeReleaseNotes(update.body ?? null),
         open: openOnFound,
         // Versão recém-descoberta reexibe o aviso do topo, mesmo que o
         // usuário tenha dispensado um aviso anterior nesta sessão.

@@ -9,18 +9,53 @@
  *   - As an explicit error class name like FLOOD_WAIT_30
  *   - Sometimes embedded in `err.seconds` (GramJS error object)
  *
- * Per the user's chosen policy: block-and-wait with the indicated time,
- * capped at FLOOD_WAIT_CAP_SECONDS so we never freeze the UI on a 300s wait.
+ * Per the user's chosen policy: block-and-wait with the indicated time, capped
+ * so we never freeze the UI on a long wait. Dois tetos existem:
+ *   - FLOOD_WAIT_CAP_SECONDS (30s) para caminhos INTERATIVOS (upload por
+ *     chunk, download), onde desistir rápido é preferível a congelar a UI.
+ *   - FLOOD_WAIT_MAX_CAP_SECONDS (900s) para caminhos NÃO-interativos
+ *     (IndexQueue), onde retentar antes do prazo exigido AGRAVA o flood.
  */
 
 /**
- * Cap on a single FLOOD_WAIT backoff. Telegram can demand 300s+; we
- * refuse to block the UI for that long. With the cap, a retry cycle
- * stays under FLOOD_WAIT_CAP_SECONDS × maxAttempts (worst case 30s × 5
- * = 150s per chunk), and the per-batch breather in the runner kicks
- * in once Telegram stops demanding a wait.
+ * Cap on a single FLOOD_WAIT backoff for INTERACTIVE paths (upload de
+ * arquivo por chunk, download, chamadas que o usuário está olhando).
+ *
+ * Por que existe: o Telegram pode exigir 300s+ e não queremos congelar a
+ * UI por tanto tempo. Num upload de arquivo, esperar 30s e retentar é
+ * razoável — se ainda estiver em flood, o retry devolve outro FLOOD_WAIT
+ * e o ciclo se repetc com um novo atraso.
+ *
+ * IMPORTANTE: este teto é CURTO de propósito e só vale para o caminho que
+ * prefere desistir rápido. Ele NÃO deve ser usado onde retentar antes do
+ * prazo agrava o flood — ver FLOOD_WAIT_MAX_CAP_SECONDS.
  */
 export const FLOOD_WAIT_CAP_SECONDS = 30;
+
+/**
+ * Cap no FLOOD_WAIT de caminhos NÃO-interativos que precisam esperar de
+ * verdade (o IndexQueue é o caso central).
+ *
+ * Por que existe e por que é 900s: retentar ANTES do prazo que o Telegram
+ * pediu não "tenta de novo" — ele RENOVA e AUMENTA o flood. O log real de
+ * campo mostrou exatamente isto:
+ *
+ *   INDEX_QUEUE_GIVE_UP last_err=A wait of 125 seconds is required
+ *   ... minutos depois ...
+ *   INDEX_PIN_FAIL chunk=0 reason=A wait of 600 seconds is required
+ *   ... e depois ...
+ *   INDEX_PIN_FAIL chunk=12 reason=A wait of 884 seconds is required
+ *
+ * A cada ciclo de 30s o app reenviava os 18 chunks do índice; cada
+ * reenvio prematuro escalava o prazo exigido (125 → 282 → 600 → 884s).
+ * O índice nunca convergia e a cota de mensagens ficava estourada — o
+ * backup seguinte caía em FLOOD_WAIT e a UI mostrava "falha de conexão",
+ * culpando a rede por um flood que o próprio app criou.
+ *
+ * 900s é o teto da espera: acima disso desistimos e devolvemos erro, em
+ * vez de esperar indefinidamente. É longo, mas é o preço de convergir.
+ */
+export const FLOOD_WAIT_MAX_CAP_SECONDS = 900;
 
 /**
  * Returns the FLOOD_WAIT delay (in seconds) Telegram is asking for, or null
@@ -56,11 +91,15 @@ export function parseFloodWaitSeconds(err: any): number | null {
 }
 
 /**
- * Cap the wait at FLOOD_WAIT_CAP_SECONDS so we never block the UI for many minutes.
- * Adds a small jitter so concurrent retries from the same queue don't pile up.
+ * Cap the wait so we never block longer than the caller tolerates.
+ *
+ * `capSeconds` default é o teto CURTO (interativo). Chamadores
+ * não-interativos (IndexQueue) passam `FLOOD_WAIT_MAX_CAP_SECONDS` para
+ * esperar o prazo real que o Telegram exigiu — retentar antes disso só
+ * agrava o flood.
  */
-export function clampFloodWait(seconds: number): number {
-  return Math.min(seconds, FLOOD_WAIT_CAP_SECONDS);
+export function clampFloodWait(seconds: number, capSeconds: number = FLOOD_WAIT_CAP_SECONDS): number {
+  return Math.min(seconds, capSeconds);
 }
 
 const TRANSIENT_PATTERNS: RegExp[] = [
@@ -158,13 +197,22 @@ export function isRunAbortError(err: any): boolean {
 /**
  * Compute the backoff delay for a transient retry.
  *
- * FLOOD_WAIT errors use the time Telegram told us to wait (clamped).
- * Other transient errors use exponential backoff with jitter, capped at 8s.
+ * FLOOD_WAIT errors use the time Telegram told us to wait (clamped to
+ * `floodCapSeconds`). Other transient errors use exponential backoff with
+ * jitter, capped at 8s.
+ *
+ * @param floodCapSeconds Teto do FLOOD_WAIT. O padrão é o teto curto
+ *   (interativo). Caminhos não-interativos passam o teto longo para
+ *   respeitar o prazo exigido e não agravar o flood.
  */
-export function computeRetryDelay(attempt: number, err: any): number {
+export function computeRetryDelay(
+  attempt: number,
+  err: any,
+  floodCapSeconds: number = FLOOD_WAIT_CAP_SECONDS,
+): number {
   const flood = parseFloodWaitSeconds(err);
   if (flood != null) {
-    return clampFloodWait(flood) * 1000 + Math.floor(Math.random() * 250);
+    return clampFloodWait(flood, floodCapSeconds) * 1000 + Math.floor(Math.random() * 250);
   }
   const base = Math.min(8000, 500 * Math.pow(2, attempt));
   return base + Math.floor(Math.random() * 250);

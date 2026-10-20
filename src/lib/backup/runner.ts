@@ -784,9 +784,9 @@ async function runBackupInner(opts: RunBackupOptions): Promise<BackupRunResult> 
 
       // Per-batch breather ADAPTATIVO. Antes era um sleep fixo de 2s a
       // cada 3 arquivos. Agora só pausamos de verdade quando o lote
-      // recente precisou de um retry/FLOOD_WAIT (`batchHadRetry`), e nesse
-      // caso escalamos para o valor longo; no caminho comum a pausa é
-      // curta (BACKUP_BREATHER_BASE_MS). Sem breather após o último
+      // recente precisou de um retry/FLOOD_WAIT (`retriesSinceBreather`), e
+      // nesse caso escalamos para o valor longo; no caminho comum a pausa
+      // é curta (BACKUP_BREATHER_BASE_MS). Sem breather após o último
       // arquivo e sem contar arquivos falhos como "sucesso do lote". O
       // sleep é interrompível: um cancel curto-circuita.
       if (

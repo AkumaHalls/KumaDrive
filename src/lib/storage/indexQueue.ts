@@ -33,6 +33,7 @@ import {
   computeRetryDelay,
   isHardError,
   parseFloodWaitSeconds,
+  FLOOD_WAIT_MAX_CAP_SECONDS,
 } from "../telegram/rateLimit";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -176,6 +177,28 @@ const DELETE_TIMEOUT_MS = 5000;
  */
 const MAX_TRANSIENT_RETRIES = 5;
 
+/**
+ * Orçamento TOTAL de esperas de FLOOD_WAIT numa janela deslizante.
+ *
+ * Por que por tempo e não por número de esperas: zerar um CONTADOR a cada
+ * sucesso não impede flood persistente. O padrão real de campo é "um
+ * commit passa, o próximo é recusado" — o contador zerava no sucesso e
+ * reiniciava em 1, então um teto de 3 NUNCA era atingido e o loop seguia
+ * por horas (cada espera pode ser de até 900s).
+ *
+ * Somando o TEMPO já gasto esperando, o teto passa a valer mesmo com
+ * sucessos intercalados: depois de 45 min acumulados aguardando flood,
+ * desistimos e devolvemos erro em vez de esperar indefinidamente.
+ */
+const FLOOD_WAIT_TOTAL_BUDGET_MS = 45 * 60 * 1000;
+
+/**
+ * Janela sem NENHUM flood após a qual o orçamento é considerado renovado.
+ * Um período longo sem recusa significa que o flood realmente passou —
+ * só então é seguro zerar o gasto acumulado.
+ */
+const FLOOD_WAIT_RESET_WINDOW_MS = 10 * 60 * 1000;
+
 interface QueueEntry {
   state: TeleFile[];
   /** Resolve handler for the caller of `enqueue`. */
@@ -190,6 +213,10 @@ class ChannelQueue {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryCountdownTimer: ReturnType<typeof setInterval> | null = null;
   private retryAttempt = 0;
+  /** Tempo total já aguardado em FLOOD_WAIT nesta janela (ms). */
+  private floodWaitSpentMs = 0;
+  /** Timestamp do último FLOOD_WAIT visto (para renovar a janela). */
+  private lastFloodAt = 0;
   private lastError: any = null;
   private readonly channelId: string;
 
@@ -242,6 +269,10 @@ class ChannelQueue {
     this.pending = null;
     this.retryingEntry = null;
     this.retryAttempt = 0;
+    // Zera também o orçamento de flood: o flush encerra o ciclo, então o
+    // próximo não deve herdar o gasto acumulado de esperas.
+    this.floodWaitSpentMs = 0;
+    this.lastFloodAt = 0;
     this.lastError = null;
     this.updateStoreState();
   }
@@ -281,6 +312,17 @@ class ChannelQueue {
     // If already draining, just return — the next entry has already replaced
     // the pending slot and will be picked up when the current pass finishes.
     if (this.inflight) return;
+
+    // FLOOD_WAIT ativo: NÃO drena agora. Sem esta guarda, qualquer
+    // `enqueueSave` que chegasse durante a espera longa chamava `drain()`,
+    // encontrava `inflight === null` e commitava o `retryingEntry` na hora —
+    // reenviando os N chunks do índice muito ANTES do prazo exigido pelo
+    // Telegram. Isso renova e agrava o flood (foi o mecanismo exato que
+    // produziu a escalada 125s → 600s → 884s no log de campo), anulando
+    // toda esta correção. Um `enqueue` durante a espera apenas substitui
+    // `pending` (coalesce); o timer armado drena quando o prazo vencer.
+    if (this.retryTimer) return;
+
     this.inflight = (async () => {
       try {
         // Drain loop: keep committing while there's something to commit.
@@ -306,13 +348,20 @@ class ChannelQueue {
             await this.commitOnce(entry.state);
             entry.resolve();
             // Reset retry counter on success — fresh attempt budget for the
-            // next entry.
+            // next entry. NÃO zeramos o orçamento de flood aqui: um sucesso
+            // isolado não prova que o flood passou (o padrão de campo é
+            // "um commit passa, o próximo é recusado"). O orçamento só é
+            // renovado por FLOOD_WAIT_RESET_WINDOW_MS sem nenhum flood.
             this.retryAttempt = 0;
           } catch (err: any) {
             this.lastError = err;
             if (isHardError(err)) {
               this.retryingEntry = null;
               this.retryAttempt = 0;
+              // Hard error também zera o orçamento de flood: o ciclo
+              // acabou, o próximo não deve herdar o gasto deste.
+              this.floodWaitSpentMs = 0;
+              this.lastFloodAt = 0;
               entry.reject(err);
               this.updateStoreState();
               // `continue`, não `break` — e este detalhe é o fix REAL. O
@@ -367,6 +416,83 @@ class ChannelQueue {
       this.retryCountdownTimer = null;
     }
 
+    // FLOOD_WAIT é uma ESPERA, não uma falha: o Telegram está dizendo
+    // "espere X e a próxima passa". Tratamos em ramo próprio para que
+    // (a) espere o prazo REAL exigido (teto longo) e (b) não consuma o
+    // orçamento de retries transitórios. O limite é um ORÇAMENTO DE TEMPO
+    // numa janela deslizante (não um contador zerado a cada sucesso, que
+    // permitiria flood persistente por horas).
+    const floodSeconds = parseFloodWaitSeconds(err);
+    if (floodSeconds != null) {
+      const now = Date.now();
+
+      // Janela renovada: passou tempo suficiente SEM flood desde a última
+      // recusa. Isso indica que o flood realmente cessou, então o gasto
+      // acumulado deixa de contar.
+      if (this.lastFloodAt > 0 && now - this.lastFloodAt > FLOOD_WAIT_RESET_WINDOW_MS) {
+        this.floodWaitSpentMs = 0;
+      }
+      this.lastFloodAt = now;
+
+      // Espera o prazo que o Telegram pediu, com teto LONGO. Retentar
+      // antes do prazo renova/agrava o flood (é o que causava a escalada
+      // 125s → 600s → 884s no log de campo).
+      const floodDelayMs =
+        computeRetryDelay(this.retryAttempt, err, FLOOD_WAIT_MAX_CAP_SECONDS);
+
+      // Orçamento estourado: desistir é melhor que ficar aguardando por
+      // horas com o índice sem convergir. Devolve erro para o caller
+      // (rollback otimista / "Salvar falhou" com botão de retry manual).
+      if (this.floodWaitSpentMs + floodDelayMs > FLOOD_WAIT_TOTAL_BUDGET_MS) {
+        const wrapped = new Error(
+          `Index save failed: FLOOD_WAIT excedeu o orçamento de ${Math.round(
+            FLOOD_WAIT_TOTAL_BUDGET_MS / 60000,
+          )}min de espera (última recusa: ${floodSeconds}s)`,
+        );
+        void invoke("log_vault_state", {
+          state: `INDEX_QUEUE_GIVE_UP flood_budget_ms=${this.floodWaitSpentMs} last_err=${err?.message ?? String(err)}`,
+        }).catch(() => {});
+        if (this.retryingEntry) {
+          const entry = this.retryingEntry;
+          this.retryingEntry = null;
+          this.floodWaitSpentMs = 0;
+          this.lastFloodAt = 0;
+          this.retryAttempt = 0;
+          entry.reject(wrapped);
+        }
+        this.updateStoreState();
+        return;
+      }
+
+      this.floodWaitSpentMs += floodDelayMs;
+      void invoke("log_vault_state", {
+        state: `INDEX_FLOOD_WAIT wait=${Math.round(floodDelayMs / 1000)}s asked=${floodSeconds}s budget_used_ms=${this.floodWaitSpentMs}`,
+      }).catch(() => {});
+
+      const deadline = Date.now() + floodDelayMs;
+      useFileStore.getState().setIndexQueueRetryInSec(Math.ceil(floodDelayMs / 1000));
+      this.retryCountdownTimer = setInterval(() => {
+        const secs = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        useFileStore.getState().setIndexQueueRetryInSec(secs);
+        if (secs <= 0 && this.retryCountdownTimer) {
+          clearInterval(this.retryCountdownTimer);
+          this.retryCountdownTimer = null;
+        }
+      }, 500);
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
+        if (this.retryCountdownTimer) {
+          clearInterval(this.retryCountdownTimer);
+          this.retryCountdownTimer = null;
+        }
+        void this.drain();
+      }, floodDelayMs);
+      this.updateStoreState();
+      return;
+    }
+
+    // Transitória NÃO-flood (rede/timeout): aqui sim é um retry que pode
+    // "gastar" orçamento, com backoff curto.
     // Increment BEFORE computing the delay so the cap is correct.
     this.retryAttempt++;
 
@@ -392,6 +518,8 @@ class ChannelQueue {
         const entry = this.retryingEntry;
         this.retryingEntry = null;
         this.retryAttempt = 0;
+        this.floodWaitSpentMs = 0;
+        this.lastFloodAt = 0;
         entry.reject(wrapped);
       }
       this.updateStoreState();

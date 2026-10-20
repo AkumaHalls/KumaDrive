@@ -10,7 +10,7 @@ Cero costos de servidor. Cero suscripciones. Cifrado MTProto directo hacia Teleg
 [**English**](../README.md) • [**Português (Brasil)**](README-pt-BR.md) • [**Español**](README-es.md) • [**简体中文**](README-zh-CN.md) • [**Русский**](README-ru.md) • [**日本語**](README-ja.md) • [**Deutsch**](README-de.md)
 
 [![Descargas Totales](https://img.shields.io/github/downloads/AkumaHalls/KumaDrive/total?style=flat-square&logo=github&logoColor=white)](https://github.com/AkumaHalls/KumaDrive/releases/)
-[![Última Versión](https://img.shields.io/badge/versión-v0.2.5-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
+[![Última Versión](https://img.shields.io/badge/versión-v0.2.6-2082f7.svg?style=flat-square)](https://github.com/AkumaHalls/KumaDrive/releases/latest/download/)
 [![Demostración en YouTube](https://img.shields.io/badge/YouTube-Vídeo%20Demo-red.svg?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/4AiMn7HSlFg)
 [![Licencia: GPL v3](https://img.shields.io/badge/licencia-GPLv3-gray.svg?style=flat-square)](../LICENSE)
 [![Estrellas en GitHub](https://img.shields.io/github/stars/AkumaHalls/KumaDrive?style=flat-square&logo=github)](https://github.com/AkumaHalls/KumaDrive/stargazers)
@@ -53,7 +53,7 @@ Telegram ofrece almacenamiento en la nube prácticamente ilimitado en canales pr
 
 ## 📥 Descargas
 
-Versión actual: **v0.2.5** · Instaladores nativos precompilados para los principales sistemas operativos:
+Versión actual: **v0.2.6** · Instaladores nativos precompilados para los principales sistemas operativos:
 
 | Sistema Operativo | Formato de Paquete | Descarga Directa | Tamaño |
 |:---|:---|:---|---:|

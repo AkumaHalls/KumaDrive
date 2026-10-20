@@ -5,6 +5,13 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.6] — 2026-10-20
+
+### Corrigido
+- **src/lib/telegram/rateLimit.ts** — o app esperava apenas 30 s quando o Telegram pedia esperas muito maiores (chegou a exigir 884 s em campo). Retentar antes do prazo exigido não "tenta de novo": ele renova e AGRAVA o bloqueio. Por isso o backup falhava com o que a tela mostrava como "falha de conexão" — era o próprio app estourando a cota de mensagens. Agora existem dois limites: 30 s para caminhos interativos (upload de arquivo, download) e até 15 min para o índice, que precisa esperar de verdade para convergir.
+- **src/lib/storage/indexQueue.ts** — o índice de arquivos era reenviado inteiro (18 mensagens) repetidamente enquanto o Telegram estava bloqueando, escalando o bloqueio de 125 s até 884 s e travando o backup seguinte. Agora, quando o Telegram pede uma espera, o índice espera o prazo real, não gasta o orçamento de retentativas comuns nessa espera, e um envio novo durante a espera não antecipa a gravação. O orçamento total de espera é de 45 min numa janela de 10 min; passado isso, o app desiste com erro claro em vez de esperar indefinidamente.
+- **src/components/update/UpdateScreen.tsx** e **.github/workflows/release.yml** — a tela de atualização mostrava "Novidades desta versão" vazio ou com o texto genérico de instalação, porque a release no GitHub nunca recebia o changelog real. Agora o workflow publica a seção da versão do `CHANGELOG.md` como texto da release, e a tela mostra esse conteúdo — ou, quando não houver, um link direto para o changelog em vez de um bloco em branco.
+
 ## [0.2.5] — 2026-10-20
 
 ### Alterado

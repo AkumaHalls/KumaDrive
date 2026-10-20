@@ -137,16 +137,32 @@ export function UpdateScreen() {
               </div>
 
               {/* Novidades */}
-              {notes && (
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-slate-700/70 dark:bg-slate-800/50">
-                  <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-[#747775] dark:text-[#8E918F]">
-                    Novidades desta versão
-                  </p>
+              <div className="rounded-2xl border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-slate-700/70 dark:bg-slate-800/50">
+                <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-[#747775] dark:text-[#8E918F]">
+                  Novidades desta versão
+                </p>
+                {notes ? (
                   <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-[#444746] dark:text-[#C4C7C5]">
                     {notes}
                   </pre>
-                </div>
-              )}
+                ) : (
+                  // Sem notas úteis (release sem changelog, ou corpo só com
+                  // instruções de instalação). Dizemos isso em vez de omitir
+                  // o bloco, para a tela não parecer incompleta.
+                  <p className="text-xs leading-relaxed text-[#747775] dark:text-[#8E918F]">
+                    Esta versão traz melhorias e correções internas. Detalhes no{" "}
+                    <a
+                      href="https://github.com/AkumaHalls/KumaDrive/blob/main/CHANGELOG.md"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
+                    >
+                      changelog
+                    </a>
+                    .
+                  </p>
+                )}
+              </div>
 
               {/* Progresso */}
               {installing && (

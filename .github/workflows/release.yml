@@ -33,6 +33,47 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      # Extrai a seção DESTA versão do CHANGELOG.md para usar como corpo da
+      # release. Isso é o que o app lê em `update.body` e mostra na tela de
+      # atualização ("Novidades desta versão"). Antes o releaseBody era fixo
+      # (instruções de instalação), então a tela nunca mostrava o que mudou.
+      - name: Extract changelog for this version
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Extraindo CHANGELOG para v${VERSION}"
+          # Pega do cabeçalho '## [VERSION]' até o próximo '## [' (exclusive).
+          # `|| true`: se o awk falhar (arquivo ausente), o `set -e` abortaria
+          # o step inteiro ANTES do fallback abaixo — e, como este step
+          # precede o tauri-action, a release toda falharia. Com `|| true`,
+          # o fallback roda.
+          NOTES="$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md || true)"
+          if [ -z "$NOTES" ]; then
+            echo "AVISO: nenhuma seção [${VERSION}] encontrada no CHANGELOG; usando fallback."
+            NOTES="Veja o CHANGELOG.md do projeto para os detalhes desta versão."
+          fi
+          {
+            echo "releaseBody<<EOF_CHANGELOG"
+            echo "## KumaDrive v${VERSION}"
+            echo ""
+            echo "### Novidades desta versão"
+            echo ""
+            echo "$NOTES"
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Instaladores para Windows**"
+            echo "- **NSIS** (recomendado — suporta atualização automática): \`*-setup.exe\`"
+            echo "- **MSI**: \`*.msi\`"
+            echo "EOF_CHANGELOG"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & bundle (assinado)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -45,15 +86,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: KumaDrive ${{ github.ref_name }}
-          releaseBody: |
-            ## KumaDrive ${{ github.ref_name }}
-
-            Instalador para Windows.
-
-            - **NSIS** (recomendado — suporta atualização automática): `*-setup.exe`
-            - **MSI**: `*.msi`
-
-            O app verifica atualizações em Configurações → Sobre → Verificar atualizações.
+          releaseBody: ${{ steps.changelog.outputs.releaseBody }}
           releaseDraft: false
           prerelease: false
 
