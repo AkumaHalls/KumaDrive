@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "kumadrive"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "argon2",
  "base64 0.21.7",

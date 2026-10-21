@@ -5,6 +5,17 @@ Todas as mudanças relevantes deste projeto são registradas neste arquivo.
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto adota [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.2.11] — 2026-10-21
+
+### Corrigido
+- **src/lib/storage/metadataStore.ts e indexQueue.ts** — depois de um backup grande, o índice de arquivos ficava "enterrado" além da janela de leitura do app (100 mensagens fixadas + 200 recentes) e, sem as fixações (que falhavam sob limite de taxa), virava uma ilha inalcançável: o app não achava o próprio índice, montava uma visão parcial, suprimia todos os salvamentos, e todo commit tentava reenviar o índice inteiro — esbarrando em esperas de 3 a 5 minutos e morrendo quando o app fechava. Era a causa de arquivos aparecerem no Telegram mas "sumirem" do app ao reabrir, e de nenhum salvamento convergir. Agora, quando a janela normal não encontra o índice, o app faz uma **busca por texto no servidor** e localiza os blocos do índice onde quer que estejam; o próximo commit então **edita** os blocos no lugar (barato, sem disparar o limite de envio) e re-fixar as pontas. O ciclo se quebra e o índice volta a convergir.
+- **src/hooks/useFileActions.ts** — o toast "Criando pasta…" ficava pendurado para sempre (a alteração aparecia na tela, mas a confirmação verde nunca vinha) porque esperava a persistência completa do índice no Telegram — que sob limite de taxa podia levar 5+ minutos. Agora o toast de sucesso aparece após 15 segundos com a sincronização continuando em segundo plano (visível no indicador de status); se a persistência falhar de verdade depois, o vermelho substitui o verde e a alteração é desfeita — o feedback continua honesto.
+- **src/lib/upload/uploadManager.ts** — o mesmo teto para o upload de arquivos: o item não fica mais preso em "quase pronto" esperando o índice; fecha como concluído após 15 s (o arquivo já está no Telegram) com a sincronização de índice em segundo plano.
+- **locales/README-*.md** — versões atualizadas para v0.2.11.
+
+### Nota de diagnóstico
+Seus arquivos enviados ontem e hoje **estão no canal do Telegram e eram recuperados pelo app a cada abertura** (o log mostra a recuperação: `BOOTSTRAP_ORPHAN_RECOVER count=5 total=957`) — o que faltava era o índice persistir de fato, e a partir desta versão ele persiste: a primeira ação após atualizar deve localizar o índice pela busca profunda, editá-lo no lugar e devolver o fast path.
+
 ## [0.2.10] — 2026-10-20
 
 ### Corrigido

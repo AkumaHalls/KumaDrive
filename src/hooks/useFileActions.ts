@@ -244,16 +244,29 @@ if (typeof window !== "undefined") {
 }
 
 /**
+ * Teto de espera pelo commit do índice antes de trocar o toast de loading
+ * por sucesso (v0.2.11).
+ *
+ * O toast de "Criando…" ficava pendurado INDEFINIDAMENTE quando a fila de
+ * índice entrava em FLOOD_WAIT (esperas de 200-300s observadas em campo, com
+ * até 5 retentativas) — a pasta já estava na tela (estado otimista), mas o
+ * verde nunca vinha. Com o teto, o toast de sucesso aparece após 15s e a
+ * sincronização de fundo continua visível no indicador de status do topo
+ * ("Sincronizando/Tentando em Xs"). Em erro hard TARDIO, o vermelho do
+ * `applyOptimistic` substitui o verde com o MESMO id — o feedback final
+ * continua honesto.
+ */
+const APPLY_FEEDBACK_MAX_WAIT_MS = 15_000;
+
+/**
  * Envolve `applyOptimistic` com o ciclo completo de feedback:
  * loading → sucesso OU erro (nunca os dois, nunca órfão).
  *
- * Por que não basta mover o `toast.success` para depois do `await`: em
- * erro transitório (FLOOD_WAIT de até ~600s) o `await` fica pendurado
- * em retry e a confirmação nunca apareceria. Criando UM toast de loading
- * com id fixo, tanto o sucesso quanto o erro (emitido pelo próprio
- * `applyOptimistic` com o MESMO id) SUBSTITUEM o loading — e o verde só
- * aparece de fato quando o índice comita, eliminando o "sucesso falso"
- * seguido de vermelho.
+ * O verde aparece quando o índice comita — OU após
+ * `APPLY_FEEDBACK_MAX_WAIT_MS`, o que ocorrer primeiro. O caso lento é
+ * sempre FLOOD_WAIT (transiente): a alteração otimista já está na tela e a
+ * fila segue retentando em background; o pior engano seria deixar o
+ * usuário olhando um "Criando…" eterno para uma pasta que já existe.
  */
 async function applyOptimisticWithFeedback(
   channelId: string,
@@ -262,8 +275,29 @@ async function applyOptimisticWithFeedback(
   messages: { pending: string; success: string; errorFallback: string },
 ): Promise<void> {
   const tid = toast.loading(messages.pending);
+  // A promise continua viva após o teto: o commit pode ainda concluir (a
+  // fila retenta sozinha) ou falhar hard (o catch INTERNO do
+  // `applyOptimistic` faz o rollback e substitui este toast pelo vermelho
+  // com o MESMO id). O `.catch` externo só evita rejeção não tratada —
+  // todos os efeitos já são tratados dentro do `applyOptimistic`.
+  const applyPromise = applyOptimistic(channelId, nextFiles, {
+    ...options,
+    toastId: tid,
+  });
+  applyPromise.catch(() => {
+    /* tratado dentro do applyOptimistic (rollback + toast.error) */
+  });
+  let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
   try {
-    await applyOptimistic(channelId, nextFiles, { ...options, toastId: tid });
+    await Promise.race([
+      applyPromise,
+      new Promise<"__feedback_timeout">((r) => {
+        feedbackTimer = setTimeout(
+          () => r("__feedback_timeout"),
+          APPLY_FEEDBACK_MAX_WAIT_MS
+        );
+      }),
+    ]);
     toast.success(messages.success, { id: tid });
   } catch (err: any) {
     // `applyOptimistic` já emitiu o toast dele com o MESMO id (marcação
@@ -274,6 +308,10 @@ async function applyOptimisticWithFeedback(
       markToasted(err);
     }
     throw err;
+  } finally {
+    // O timer do perdedor da corrida continua vivo sem isto — um timer
+    // pendente de 15s por ação, segurando a closure na memória à toa.
+    if (feedbackTimer) clearTimeout(feedbackTimer);
   }
 }
 

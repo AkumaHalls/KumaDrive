@@ -4,6 +4,7 @@ import { TeleFile } from "../types";
 import { useFileStore } from "../../stores/fileStore";
 import { enqueueSave } from "./indexQueue";
 import { filterJunkFiles } from "./fileSanitizer";
+import { invoke } from "@tauri-apps/api/core";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -760,7 +761,55 @@ export async function loadIndex(channelId: string): Promise<TeleFile[]> {
     return [];
   }
 
-  const chosenSet = pickCoherentIndexSet(allMsgs);
+  // JANELA CEGA (evidência de campo, v0.2.11): pins + 200 recentes não são
+  // o canal inteiro. Depois de um backup grande (centenas de uploads) a
+  // epoch do índice fica a MILHARES de mensagens do fim; se os pins das
+  // pontas falharam na época das tempestades de FLOOD_WAIT, ela fica
+  // inalcançável por AMBAS as leituras — `INDEX_EXISTING_NONE
+  // scannedMsgs=300` — e o app monta uma visão best-effort que perde os
+  // arquivos recentes e SUPRIME todos os saves. Todo commit então parte
+  // do zero (reenvio da epoch inteira) e esbarra no rate limit: um ciclo
+  // que nunca converge. A busca por TEXTO no servidor acha os chunks de
+  // índice onde quer que estejam enterrados e quebra o ciclo.
+  let chosenSet = pickCoherentIndexSet(allMsgs);
+  // Gate: rodar a busca profunda enquanto HOUVER mensagens lidas
+  // (allMsgs.length > 0). O caso "nenhuma leitura funcionou" já foi
+  // descartado pelo throw acima. Exigir `readsFailed === 0` aqui deixava
+  // o loadIndex CEGO exatamente na rede degradada que mais precisa dele:
+  // o fetch de pins estoura o timeout de 5s sob FLOOD_WAIT
+  // (readsFailed=1), o fetch de recentes funciona mas não alcança a
+  // epoch enterrada — e a busca profunda (que tem timeout PRÓPRIO e é
+  // best-effort) nem rodava. O commitOnce (indexQueue) não tem esse
+  // gate; os dois agora se comportam igual.
+  if (!chosenSet && allMsgs.length > 0) {
+    try {
+      const deep = await withTimeout(
+        client.getMessages(peer, { search: "kumadrive_index", limit: 500 }),
+        10_000,
+        "client.getMessages(deep index search)"
+      );
+      if (deep && deep.length > 0) {
+        await invoke("log_vault_state", {
+          state: `INDEX_DEEP_SEARCH hit=${deep.length}${deep.length >= 500 ? " partial=true" : ""}`,
+        }).catch(() => {});
+        allMsgs = allMsgs.concat(deep);
+        chosenSet = pickCoherentIndexSet(allMsgs);
+        if (!chosenSet && deep.length >= 500) {
+          await invoke("log_vault_state", {
+            state: `INDEX_DEEP_SEARCH_PARTIAL hit=${deep.length} reason=limit_sem_epoch_coerente`,
+          }).catch(() => {});
+        }
+      }
+    } catch (deepErr: any) {
+      // Best-effort: sem a busca, o fluxo cai no merge best-effort como
+      // antes. Não é erro fatal — só registramos para diagnóstico.
+      console.warn("[metadataStore] Deep index search failed:", deepErr);
+      await invoke("log_vault_state", {
+        state: `INDEX_DEEP_SEARCH_FAIL reason=${deepErr?.message ?? deepErr}`,
+      }).catch(() => {});
+    }
+  }
+
   if (!chosenSet) {
     console.warn(
       `[metadataStore] No coherent index set found across ${allMsgs.length} message(s); using best-effort merge WITHOUT persisting.`

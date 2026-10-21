@@ -731,6 +731,7 @@ class ChannelQueue {
     //    The fix: combine pinned + recent (BOTH, not either), then let
     //    pickCoherentIndexSet pick the same set loadIndex would pick.
     let allMsgs: any[] = [];
+    let pinnedIdSet = new Set<number>();
     try {
       const pinned = await withTimeout(
         client.getMessages(peer, {
@@ -740,6 +741,9 @@ class ChannelQueue {
         FETCH_TIMEOUT_MS,
         "client.getMessages(pinned)"
       );
+      for (const m of pinned as any[]) {
+        if (m?.id != null) pinnedIdSet.add(Number(m.id));
+      }
       allMsgs = allMsgs.concat(pinned);
     } catch (err) {
       // Fetch failed — treat as transient so we retry.
@@ -791,6 +795,57 @@ class ChannelQueue {
       await invoke("log_vault_state", {
         state: `INDEX_EXISTING_NONE scannedMsgs=${allMsgs.length}`,
       }).catch(() => {});
+    }
+
+    // JANELA CEGA (mesma correção do loadIndex, v0.2.11): se pins + recentes
+    // não acharam NENHUMA epoch, a epoch viva pode estar enterrada além da
+    // janela (epoch de ~96 chunks sob ~950 mensagens de arquivo) e sem pins
+    // (fixações falharam na era dos FLOOD_WAITs). Busca por TEXTO no
+    // servidor antes de concluir que não existe índice — sem isto, todo
+    // commit reenviava a epoch inteira (N sends no bucket de sendMessage
+    // queimado) e o ciclo de FLOOD_WAIT nunca convergia.
+    let epochCameFromDeepSearch = false;
+    if (existing.length === 0) {
+      try {
+        const deep = await withTimeout(
+          client.getMessages(peer, { search: "kumadrive_index", limit: 500 }),
+          10_000,
+          "client.getMessages(deep index search)"
+        );
+        if (deep && deep.length > 0) {
+          await invoke("log_vault_state", {
+            state: `INDEX_DEEP_SEARCH_COMMIT hit=${deep.length}${deep.length >= 500 ? " partial=true" : ""}`,
+          }).catch(() => {});
+          allMsgs = allMsgs.concat(deep);
+          const deepSet = pickCoherentIndexSet(allMsgs);
+          if (deepSet) {
+            const deepById = new Map<number, any>();
+            for (const m of allMsgs) {
+              if (m?.id != null) deepById.set(Number(m.id), m);
+            }
+            existing.length = 0;
+            for (const c of deepSet) {
+              const m = deepById.get(c.msgId);
+              if (m) existing.push(m);
+            }
+            epochCameFromDeepSearch = true;
+            // L3: msgIds truncados — o vault_state.log é colado em bug
+            // reports; count + primeiros ids bastam para diagnóstico.
+            const deepIdList =
+              existing.length > 4
+                ? `${existing.slice(0, 4).map((m: any) => m.id).join(",")} +${existing.length - 4}`
+                : existing.map((m: any) => m.id).join(",");
+            await invoke("log_vault_state", {
+              state: `INDEX_DEEP_SEARCH_FOUND count=${existing.length} msgIds=[${deepIdList}]`,
+            }).catch(() => {});
+          }
+        }
+      } catch (deepErr: any) {
+        console.warn("[indexQueue] Deep index search failed:", deepErr);
+        await invoke("log_vault_state", {
+          state: `INDEX_DEEP_SEARCH_COMMIT_FAIL reason=${deepErr?.message ?? deepErr}`,
+        }).catch(() => {});
+      }
     }
 
     // 2. EDIÇÃO-IN-PLACE (caminho feliz — portado de volta do Teledrive
@@ -898,6 +953,41 @@ class ChannelQueue {
         await invoke("log_vault_state", {
           state: `INDEX_EDIT_OK chunks=${chunks.length} files=${state.length} msgIds=[${idList}]`,
         }).catch(() => {});
+        // RE-PIN das pontas quando a epoch veio da busca profunda: ela
+        // estava sem fixação (é assim que uma epoch fica inalcançável
+        // pelas janelas normais). Sem o re-pin, a busca profunda viraria
+        // o caminho PERMANENTE de toda leitura/commit. Best-effort com
+        // timeout próprio — falha de pin nunca derruba o commit.
+        if (epochCameFromDeepSearch && existing.length > 0) {
+          const edgeMsgs = [existing[0], existing[existing.length - 1]];
+          for (const m of edgeMsgs) {
+            // Id já fixado não gera novo RPC: enquanto a epoch estiver
+            // enterrada além da janela, a busca profunda é o caminho
+            // confiável (os pins das bordas não trazem os chunks do meio
+            // de volta sozinhos) — o re-pin existe para o caso em que o
+            // fast path volta a ser viável, e repeti-lo por commit só
+            // gastaria cota de pin à toa.
+            if (pinnedIdSet.has(Number(m?.id))) continue;
+            try {
+              await withTimeout(
+                client.invoke(
+                  new Api.messages.UpdatePinnedMessage({
+                    peer,
+                    id: Number(m.id),
+                    unpin: false,
+                    silent: true,
+                  })
+                ),
+                PIN_TIMEOUT_MS,
+                `UpdatePinnedMessage(deep-recover edge)`
+              );
+            } catch (pinErr: any) {
+              await invoke("log_vault_state", {
+                state: `INDEX_PIN_FAIL id=${m?.id} source=deep_recover reason=${pinErr?.message ?? pinErr}`,
+              }).catch(() => {});
+            }
+          }
+        }
         // Não retornamos aqui: o fluxo segue para o passo 4, que apaga
         // qualquer chunk de índice em `allMsgs` que NÃO pertença à epoch
         // viva que acabamos de editar. O `return` cedo deixaria lixo de

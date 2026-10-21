@@ -77,6 +77,17 @@ import { logEvent } from "../events";
 import { isJunkFile } from "../storage/fileSanitizer";
 
 /**
+ * Teto de espera pelo commit do índice após o upload do arquivo (v0.2.11).
+ *
+ * O blob já está no Telegram quando o upload termina; o que falta é o
+ * índice, e sob FLOOD_WAIT (esperas de 200-300s observadas em campo) o
+ * commit podia deixar o item preso em "quase pronto" por minutos. O item
+ * fecha como done após este teto e a sincronização segue em background;
+ * erro hard tardio ainda faz rollback com aviso.
+ */
+const UPLOAD_INDEX_FEEDBACK_MAX_WAIT_MS = 15_000;
+
+/**
  * Wait until `bootstrapComplete=true` on the file store, capped at `timeoutMs`.
  * The orphan recovery scan in bootstrap.ts runs BEFORE it flips bootstrapComplete,
  * so the upload's optimistic-state merge won't miss files the scan is about to
@@ -287,8 +298,14 @@ export async function processQueue(): Promise<void> {
             // NUNCA aparecia no drive, sem nenhuma explicação.
             updateQueueItem(item.id, { progress: 100 });
 
-            try {
-              await enqueueSave(channelId, optimisticFiles);
+            // Teto de feedback (v0.2.11): o blob já está no Telegram neste
+            // ponto; o que falta é o índice, e sob FLOOD_WAIT isso podia
+            // levar minutos com o item preso em "quase pronto". O item
+            // fecha como done após o teto; a sincronização do índice segue
+            // em background (indicador de status do topo) e um erro hard
+            // tardio ainda faz o rollback com aviso.
+            const indexSavePromise = enqueueSave(channelId, optimisticFiles);
+            const markUploadDone = async () => {
               updateQueueItem(item.id, { status: "done", progress: 100 });
               toast.success(`"${item.name}" enviado com sucesso!`);
               await invoke("log_vault_state", {
@@ -298,7 +315,8 @@ export async function processQueue(): Promise<void> {
                 type: "file.uploaded",
                 payload: { name: item.name, size: Number(newFile.size) || 0 },
               });
-            } catch (indexErr: any) {
+            };
+            const handleIndexSaveError = async (indexErr: any) => {
               // Hard error from the queue (auth lost, channel missing, etc.).
               // Roll back the optimistic files array for this single upload by
               // removing the just-added entry; transient errors are swallowed
@@ -335,6 +353,33 @@ export async function processQueue(): Promise<void> {
                   }
                 );
               }
+            };
+            let indexSaveTimedOut = false;
+            let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+            try {
+              await Promise.race([
+                indexSavePromise,
+                new Promise<"__upload_feedback_timeout">((r) => {
+                  feedbackTimer = setTimeout(() => {
+                    indexSaveTimedOut = true;
+                    r("__upload_feedback_timeout");
+                  }, UPLOAD_INDEX_FEEDBACK_MAX_WAIT_MS);
+                }),
+              ]);
+              await markUploadDone();
+            } catch (indexErr: any) {
+              await handleIndexSaveError(indexErr);
+            } finally {
+              if (feedbackTimer) clearTimeout(feedbackTimer);
+            }
+            if (indexSaveTimedOut) {
+              // Settlement tardio do caso timeout: o commit pode concluir
+              // (nada a fazer — o índice pegou o arquivo) ou falhar (o
+              // handler acima roda: rollback + aviso). Sem isto, uma
+              // rejeição tardia viraria unhandled rejection.
+              indexSavePromise.catch((e: any) => {
+                void handleIndexSaveError(e);
+              });
             }
           }
         } catch (err: any) {
